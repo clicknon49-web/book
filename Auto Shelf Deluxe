@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════
--- 📚 Delta Auto Shelf Deluxe (REVISED v2)
--- แก้ไข: Cache ชั้น | ป้องกัน Crash | Track ชั้นที่ใช้แล้ว
+-- 📚 Delta Auto Shelf Deluxe (REVISED v3)
+-- แก้ไข: เพิ่มฟังก์ชัน scanBooks | ป้องกัน Crash | Track ชั้นที่ใช้แล้ว
 -- ═══════════════════════════════════════════════
 
 local Players = game:GetService("Players")
@@ -415,6 +415,28 @@ local function isShelf(obj)
     return false
 end
 
+-- ✅ เพิ่มฟังก์ชัน scanBooks ที่หายไป
+local function scanBooks()
+    local hrp = getHRP()
+    if not hrp then return {} end
+
+    local list = {}
+    local desc = Workspace:GetDescendants()
+
+    for i, obj in ipairs(desc) do
+        if isBook(obj) then
+            local d = (obj.Position - hrp.Position).Magnitude
+            if d <= Config.ScanRadius then
+                if i % 500 == 0 then task.wait() end
+                table.insert(list, {book = obj, dist = d})
+            end
+        end
+    end
+
+    table.sort(list, function(a, b) return a.dist < b.dist end)
+    return list
+end
+
 -- สร้าง FilterList อย่างปลอดภัย (ป้องกัน Character เป็น nil)
 local function getSafeFilterList(obj)
     local list = {obj}
@@ -640,4 +662,4 @@ updateToggle()
 UI.statusLabel.Text = "✨ พร้อมใช้งาน! กด ON เพื่อเริ่ม (รัศมีชั้น: " .. Config.ShelfRadius .. ")"
 UI.statusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
 
-print("✅ Delta Auto Shelf REVISED Loaded")
+print("✅ Delta Auto Shelf REVISED v3 Loaded")
