@@ -1,7 +1,6 @@
 -- ═══════════════════════════════════════════════
--- 📚 Delta Auto Shelf Deluxe
--- ออกแบบสำหรับเกมที่มีหนังสือ MeshPart (rbxassetid://131573217673056)
--- และชั้นวางชื่อ "ShelfComplete"
+-- 📚 Delta Auto Shelf Deluxe (FIXED EDITION)
+-- แก้ไขให้รองรับชื่อชั้น BookShelf10/13/15
 -- ═══════════════════════════════════════════════
 
 local Players = game:GetService("Players")
@@ -19,15 +18,26 @@ local Camera = Workspace.CurrentCamera
 getgenv().AutoShelfConfig = getgenv().AutoShelfConfig or {
     Enabled = false,
     ScanRadius = 50,
-    ShelfRadius = 80,
+    ShelfRadius = 2000, -- ↑ เพิ่มจาก 80 เป็น 2000 (ชั้นอยู่ไกล ~1500 studs)
     Speed = 1.0,
-    PlaceOffset = 1.1,
+    PlaceOffset = 5,    -- ↑ ปรับจาก 1.1 เป็น 5 (ชั้นสูง ~11 studs)
     ProcessedBooks = {}
 }
 
 local Config = getgenv().AutoShelfConfig
+
+-- รีเซ็ตค่าเก่าถ้ายังเป็น default ของเวอร์ชันก่อน
+if Config.ShelfRadius == 80 then Config.ShelfRadius = 2000 end
+if Config.PlaceOffset == 1.1 then Config.PlaceOffset = 5 end
+
 local BOOK_MESH_ID = "rbxassetid://131573217673056"
-local SHELF_NAME = "ShelfComplete"
+
+-- MeshId ของชั้นหนังสือแต่ละแบบ (จาก JSON dump)
+local SHELF_MESH_IDS = {
+    ["rbxassetid://113241345681988"] = true, -- BookShelf10
+    ["rbxassetid://111558057440478"] = true, -- BookShelf13
+    ["rbxassetid://112357180449332"] = true, -- BookShelf15
+}
 
 local isRunning = false
 local draggingUI = false
@@ -35,7 +45,7 @@ local dragStart = nil
 local startPos = nil
 
 -- ═══════════════════════════════════════════════
--- UI CREATION (สไตล์จาก JSON dump)
+-- UI CREATION
 -- ═══════════════════════════════════════════════
 local function createUI()
     local gui = Instance.new("ScreenGui")
@@ -44,7 +54,6 @@ local function createUI()
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    -- Main Frame
     local main = Instance.new("Frame")
     main.Name = "MainFrame"
     main.Size = UDim2.new(0, 360, 0, 430)
@@ -72,7 +81,6 @@ local function createUI()
     gradient.Rotation = 45
     gradient.Parent = main
 
-    -- Title Bar
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
     titleBar.Size = UDim2.new(1, 0, 0, 45)
@@ -103,7 +111,6 @@ local function createUI()
     title.TextSize = 20
     title.Parent = titleBar
 
-    -- Close Button
     local closeBtn = Instance.new("TextButton")
     closeBtn.Name = "CloseBtn"
     closeBtn.Size = UDim2.new(0, 32, 0, 32)
@@ -114,10 +121,8 @@ local function createUI()
     closeBtn.Font = Enum.Font.GothamBold
     closeBtn.TextSize = 16
     closeBtn.Parent = titleBar
-
     Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
 
-    -- Float Button (เมื่อปิด UI)
     local floatBtn = Instance.new("TextButton")
     floatBtn.Name = "FloatToggle"
     floatBtn.Size = UDim2.new(0, 50, 0, 50)
@@ -128,13 +133,11 @@ local function createUI()
     floatBtn.Font = Enum.Font.GothamBold
     floatBtn.Visible = false
     floatBtn.Parent = gui
-
     Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(1, 0)
     local floatStroke = Instance.new("UIStroke", floatBtn)
     floatStroke.Color = Color3.fromRGB(100, 180, 255)
     floatStroke.Thickness = 3
 
-    -- Content
     local content = Instance.new("Frame")
     content.Name = "Content"
     content.Size = UDim2.new(1, -30, 1, -60)
@@ -147,7 +150,6 @@ local function createUI()
     listLayout.SortOrder = Enum.SortOrder.LayoutOrder
     listLayout.Parent = content
 
-    -- ═══ Toggle ═══
     local toggleFrame = Instance.new("Frame")
     toggleFrame.Size = UDim2.new(1, 0, 0, 50)
     toggleFrame.BackgroundTransparency = 1
@@ -174,10 +176,8 @@ local function createUI()
     toggleBtn.TextSize = 14
     toggleBtn.AutoButtonColor = false
     toggleBtn.Parent = toggleFrame
-
     Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 18)
 
-    -- ═══ Status ═══
     local statusLabel = Instance.new("TextLabel")
     statusLabel.Name = "StatusLabel"
     statusLabel.Size = UDim2.new(1, 0, 0, 24)
@@ -189,13 +189,11 @@ local function createUI()
     statusLabel.TextSize = 14
     statusLabel.Parent = content
 
-    -- ═══ Stats Box ═══
     local statsFrame = Instance.new("Frame")
     statsFrame.Size = UDim2.new(1, 0, 0, 60)
     statsFrame.BackgroundColor3 = Color3.fromRGB(30, 35, 45)
     statsFrame.BorderSizePixel = 0
     statsFrame.Parent = content
-
     Instance.new("UICorner", statsFrame).CornerRadius = UDim.new(0, 10)
 
     local bookCount = Instance.new("TextLabel")
@@ -219,7 +217,6 @@ local function createUI()
     shelfCount.TextSize = 14
     shelfCount.Parent = statsFrame
 
-    -- ═══ Distance Slider ═══
     local distFrame = Instance.new("Frame")
     distFrame.Size = UDim2.new(1, 0, 0, 50)
     distFrame.BackgroundTransparency = 1
@@ -241,7 +238,6 @@ local function createUI()
     distTrack.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
     distTrack.BorderSizePixel = 0
     distTrack.Parent = distFrame
-
     Instance.new("UICorner", distTrack).CornerRadius = UDim.new(1, 0)
 
     local distFill = Instance.new("Frame")
@@ -249,7 +245,6 @@ local function createUI()
     distFill.BackgroundColor3 = Color3.fromRGB(80, 160, 255)
     distFill.BorderSizePixel = 0
     distFill.Parent = distTrack
-
     Instance.new("UICorner", distFill).CornerRadius = UDim.new(1, 0)
 
     local distHandle = Instance.new("Frame")
@@ -258,10 +253,8 @@ local function createUI()
     distHandle.BackgroundColor3 = Color3.fromRGB(120, 190, 255)
     distHandle.BorderSizePixel = 0
     distHandle.Parent = distTrack
-
     Instance.new("UICorner", distHandle).CornerRadius = UDim.new(1, 0)
 
-    -- ═══ Speed Slider ═══
     local speedFrame = Instance.new("Frame")
     speedFrame.Size = UDim2.new(1, 0, 0, 50)
     speedFrame.BackgroundTransparency = 1
@@ -283,7 +276,6 @@ local function createUI()
     speedTrack.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
     speedTrack.BorderSizePixel = 0
     speedTrack.Parent = speedFrame
-
     Instance.new("UICorner", speedTrack).CornerRadius = UDim.new(1, 0)
 
     local speedFill = Instance.new("Frame")
@@ -291,7 +283,6 @@ local function createUI()
     speedFill.BackgroundColor3 = Color3.fromRGB(255, 180, 80)
     speedFill.BorderSizePixel = 0
     speedFill.Parent = speedTrack
-
     Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
 
     local speedHandle = Instance.new("Frame")
@@ -300,10 +291,8 @@ local function createUI()
     speedHandle.BackgroundColor3 = Color3.fromRGB(255, 200, 120)
     speedHandle.BorderSizePixel = 0
     speedHandle.Parent = speedTrack
-
     Instance.new("UICorner", speedHandle).CornerRadius = UDim.new(1, 0)
 
-    -- ═══ Info ═══
     local infoLabel = Instance.new("TextLabel")
     infoLabel.Size = UDim2.new(1, 0, 0, 50)
     infoLabel.BackgroundTransparency = 1
@@ -328,10 +317,8 @@ end
 local UI = createUI()
 
 -- ═══════════════════════════════════════════════
--- UI LOGIC (Draggable + Slider + Toggle)
+-- UI LOGIC
 -- ═══════════════════════════════════════════════
-
--- Drag
 UI.titleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         draggingUI = true
@@ -353,7 +340,6 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
--- Close / Float
 UI.closeBtn.MouseButton1Click:Connect(function()
     UI.main.Visible = false
     UI.floatBtn.Visible = true
@@ -364,7 +350,6 @@ UI.floatBtn.MouseButton1Click:Connect(function()
     UI.floatBtn.Visible = false
 end)
 
--- Toggle
 local function updateToggle()
     if Config.Enabled then
         UI.toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 200, 120)
@@ -385,46 +370,38 @@ UI.toggleBtn.MouseButton1Click:Connect(function()
     updateToggle()
 end)
 
--- Slider System
 local function setupSlider(track, handle, fill, label, configKey, min, max, prefix, isFloat)
     local draggingSlider = false
-
     local function update(x)
         local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
         local val = isFloat and (min + (max - min) * rel) or math.floor(min + (max - min) * rel)
         if isFloat then val = math.floor(val * 10) / 10 end
-
         Config[configKey] = val
         handle.Position = UDim2.new(rel, -8, 0.5, -8)
         fill.Size = UDim2.new(rel, 0, 1, 0)
         label.Text = prefix .. tostring(val) .. (isFloat and "x" or "")
     end
-
     handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             draggingSlider = true
         end
     end)
-
     track.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             update(input.Position.X)
             draggingSlider = true
         end
     end)
-
     UserInputService.InputChanged:Connect(function(input)
         if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             update(input.Position.X)
         end
     end)
-
     UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             draggingSlider = false
         end
     end)
-
     local initRel = (Config[configKey] - min) / (max - min)
     handle.Position = UDim2.new(initRel, -8, 0.5, -8)
     fill.Size = UDim2.new(initRel, 0, 1, 0)
@@ -434,7 +411,7 @@ setupSlider(UI.distFill.Parent, UI.distHandle, UI.distFill, UI.distLabel, "ScanR
 setupSlider(UI.speedFill.Parent, UI.speedHandle, UI.speedFill, UI.speedLabel, "Speed", 0.1, 3.0, "⚡ ความเร็ว Tween: ", true)
 
 -- ═══════════════════════════════════════════════
--- CORE FUNCTIONS
+-- CORE FUNCTIONS (FIXED)
 -- ═══════════════════════════════════════════════
 
 local function getHRP()
@@ -450,15 +427,24 @@ local function isBook(obj)
     return true
 end
 
+-- ✅ แก้ไข: รองรับชื่อ BookShelf10/13/15 และ MeshId ของชั้น
 local function isShelf(obj)
-    return obj.Name == SHELF_NAME and obj:IsA("BasePart")
+    if not obj or not obj.Parent then return false end
+    -- เช็คจากชื่อขึ้นต้นด้วย BookShelf ตามด้วยตัวเลข
+    if obj.Name:match("^BookShelf%d+$") then
+        return obj:IsA("MeshPart") or obj:IsA("BasePart")
+    end
+    -- เช็คจาก MeshId สำรอง
+    if obj:IsA("MeshPart") and obj.MeshId then
+        return SHELF_MESH_IDS[obj.MeshId] == true
+    end
+    return false
 end
 
 local function scanBooks()
     local list = {}
     local hrp = getHRP()
     if not hrp then return list end
-
     for _, obj in pairs(Workspace:GetDescendants()) do
         if isBook(obj) then
             local d = (obj.Position - hrp.Position).Magnitude
@@ -471,6 +457,7 @@ local function scanBooks()
     return list
 end
 
+-- ✅ แก้ไข: ใช้ GetPartBoundsInRadius แทน GetPartsInPart (เวิร์คกับ MeshPart ขนาดใหญ่)
 local function scanShelves()
     local list = {}
     local hrp = getHRP()
@@ -480,14 +467,26 @@ local function scanShelves()
         if isShelf(obj) then
             local d = (obj.Position - hrp.Position).Magnitude
             if d <= Config.ShelfRadius then
+                local targetCF = obj.CFrame * CFrame.new(0, Config.PlaceOffset, 0)
+                local targetPos = targetCF.Position
+                
+                -- เช็คว่างโดยดูว่ามีหนังสืออยู่ในระยะ 3 studs จากจุดที่จะวางหรือไม่
+                local overlapParams = OverlapParams.new()
+                overlapParams.FilterDescendantsInstances = {obj, LocalPlayer.Character}
+                overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
+                
+                local parts = Workspace:GetPartBoundsInRadius(targetPos, 3, overlapParams)
                 local empty = true
-                local success, parts = pcall(function() return Workspace:GetPartsInPart(obj) end)
-                if success then
-                    for _, p in pairs(parts) do
-                        if p ~= obj and isBook(p) then empty = false; break end
+                for _, p in pairs(parts) do
+                    if isBook(p) then
+                        empty = false
+                        break
                     end
                 end
-                if empty then table.insert(list, {shelf = obj, dist = d}) end
+                
+                if empty then
+                    table.insert(list, {shelf = obj, dist = d})
+                end
             end
         end
     end
@@ -518,7 +517,7 @@ local function tweenBook(book, shelf)
 end
 
 -- ═══════════════════════════════════════════════
--- MAIN LOOP
+-- MAIN LOOP (FIXED)
 -- ═══════════════════════════════════════════════
 
 local function mainLoop()
@@ -545,7 +544,6 @@ local function mainLoop()
                 if not Config.Enabled then break end
                 if not data.book.Parent then continue end
 
-                -- Rescan shelves if empty
                 if #shelves == 0 then shelves = scanShelves() end
                 if #shelves == 0 then break end
 
@@ -556,12 +554,16 @@ local function mainLoop()
                 end
 
                 -- Double check empty
+                local targetCF = shelfData.shelf.CFrame * CFrame.new(0, Config.PlaceOffset, 0)
+                local targetPos = targetCF.Position
                 local stillEmpty = true
-                local success, parts = pcall(function() return Workspace:GetPartsInPart(shelfData.shelf) end)
-                if success then
-                    for _, p in pairs(parts) do
-                        if p ~= shelfData.shelf and isBook(p) then stillEmpty = false; break end
-                    end
+                
+                local overlapParams = OverlapParams.new()
+                overlapParams.FilterDescendantsInstances = {shelfData.shelf, LocalPlayer.Character}
+                overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
+                local parts = Workspace:GetPartBoundsInRadius(targetPos, 3, overlapParams)
+                for _, p in pairs(parts) do
+                    if isBook(p) then stillEmpty = false; break end
                 end
 
                 if stillEmpty then
@@ -583,7 +585,7 @@ local function mainLoop()
             if #books == 0 then
                 UI.statusLabel.Text = "🔍 ไม่พบหนังสือในระยะ " .. Config.ScanRadius
             else
-                UI.statusLabel.Text = "⚠️ ไม่พบชั้นวางว่าง!"
+                UI.statusLabel.Text = "⚠️ ไม่พบชั้นวางว่าง! (เจอชั้นทั้งหมด: 0)"
             end
             UI.statusLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
         end
@@ -598,7 +600,7 @@ end
 -- ═══════════════════════════════════════════════
 task.spawn(mainLoop)
 updateToggle()
-UI.statusLabel.Text = "✨ พร้อมใช้งาน! กดปุ่ม ON เพื่อเริ่ม"
+UI.statusLabel.Text = "✨ พร้อมใช้งาน! กดปุ่ม ON เพื่อเริ่ม (รัศมีชั้น: " .. Config.ShelfRadius .. ")"
 UI.statusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
 
-print("✅ Delta Auto Shelf Loaded | กดปุ่ม ON บน UI เพื่อเริ่มทำงาน")
+print("✅ Delta Auto Shelf FIXED Loaded | รองรับ BookShelf10/13/15 | รัศมี:", Config.ShelfRadius)
