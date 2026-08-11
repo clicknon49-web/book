@@ -1,6 +1,6 @@
 -- ═══════════════════════════════════════════════
--- 📚 Delta Auto Shelf Deluxe (FIXED EDITION)
--- แก้ไขให้รองรับชื่อชั้น BookShelf10/13/15
+-- 📚 Delta Auto Shelf Deluxe (JSON-FIXED V2)
+-- แก้ไขตามโครงสร้างจริงจาก Workspace JSON dump
 -- ═══════════════════════════════════════════════
 
 local Players = game:GetService("Players")
@@ -18,21 +18,22 @@ local Camera = Workspace.CurrentCamera
 getgenv().AutoShelfConfig = getgenv().AutoShelfConfig or {
     Enabled = false,
     ScanRadius = 50,
-    ShelfRadius = 2000, -- ↑ เพิ่มจาก 80 เป็น 2000 (ชั้นอยู่ไกล ~1500 studs)
+    ShelfRadius = 2000,
     Speed = 1.0,
-    PlaceOffset = 5,    -- ↑ ปรับจาก 1.1 เป็น 5 (ชั้นสูง ~11 studs)
-    ProcessedBooks = {}
+    PlaceOffset = nil, -- ปล่อย nil ให้คำนวณอัตโนมัติจากขนาดชั้น
+    ProcessedBooks = {},
+    Debug = true, -- เปิด Debug print
+    SkipOccupiedCheck = true, -- ข้ามการเช็คว่าง (แก้ปัญหาหลัก!)
 }
 
 local Config = getgenv().AutoShelfConfig
 
--- รีเซ็ตค่าเก่าถ้ายังเป็น default ของเวอร์ชันก่อน
+-- Force reset ถ้าเป็น default เก่า
 if Config.ShelfRadius == 80 then Config.ShelfRadius = 2000 end
-if Config.PlaceOffset == 1.1 then Config.PlaceOffset = 5 end
+if Config.PlaceOffset == 1.1 then Config.PlaceOffset = nil end
 
 local BOOK_MESH_ID = "rbxassetid://131573217673056"
 
--- MeshId ของชั้นหนังสือแต่ละแบบ (จาก JSON dump)
 local SHELF_MESH_IDS = {
     ["rbxassetid://113241345681988"] = true, -- BookShelf10
     ["rbxassetid://111558057440478"] = true, -- BookShelf13
@@ -45,7 +46,7 @@ local dragStart = nil
 local startPos = nil
 
 -- ═══════════════════════════════════════════════
--- UI CREATION
+-- UI CREATION (เหมือนเดิม)
 -- ═══════════════════════════════════════════════
 local function createUI()
     local gui = Instance.new("ScreenGui")
@@ -317,7 +318,7 @@ end
 local UI = createUI()
 
 -- ═══════════════════════════════════════════════
--- UI LOGIC
+-- UI LOGIC (เหมือนเดิม)
 -- ═══════════════════════════════════════════════
 UI.titleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -411,7 +412,7 @@ setupSlider(UI.distFill.Parent, UI.distHandle, UI.distFill, UI.distLabel, "ScanR
 setupSlider(UI.speedFill.Parent, UI.speedHandle, UI.speedFill, UI.speedLabel, "Speed", 0.1, 3.0, "⚡ ความเร็ว Tween: ", true)
 
 -- ═══════════════════════════════════════════════
--- CORE FUNCTIONS (FIXED)
+-- CORE FUNCTIONS (JSON-FIXED)
 -- ═══════════════════════════════════════════════
 
 local function getHRP()
@@ -427,17 +428,21 @@ local function isBook(obj)
     return true
 end
 
--- ✅ แก้ไข: รองรับชื่อ BookShelf10/13/15 และ MeshId ของชั้น
+-- ✅ แก้ไข: รองรับชื่อ BookShelf10/13/15 + MeshId
 local function isShelf(obj)
     if not obj or not obj.Parent then return false end
-    -- เช็คจากชื่อขึ้นต้นด้วย BookShelf ตามด้วยตัวเลข
+    if not (obj:IsA("MeshPart") or obj:IsA("BasePart")) then return false end
+    
+    -- เช็คชื่อ
     if obj.Name:match("^BookShelf%d+$") then
-        return obj:IsA("MeshPart") or obj:IsA("BasePart")
+        return true
     end
-    -- เช็คจาก MeshId สำรอง
+    
+    -- เช็ค MeshId สำรอง
     if obj:IsA("MeshPart") and obj.MeshId then
         return SHELF_MESH_IDS[obj.MeshId] == true
     end
+    
     return false
 end
 
@@ -457,48 +462,88 @@ local function scanBooks()
     return list
 end
 
--- ✅ แก้ไข: ใช้ GetPartBoundsInRadius แทน GetPartsInPart (เวิร์คกับ MeshPart ขนาดใหญ่)
+-- ✅ แก้ไขหลัก: ค้นหาชั้นวางจาก Folder "BookShelves" โดยตรง + ไม่ใช้ GetPartBoundsInRadius
 local function scanShelves()
     local list = {}
     local hrp = getHRP()
     if not hrp then return list end
 
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if isShelf(obj) then
-            local d = (obj.Position - hrp.Position).Magnitude
-            if d <= Config.ShelfRadius then
-                local targetCF = obj.CFrame * CFrame.new(0, Config.PlaceOffset, 0)
-                local targetPos = targetCF.Position
-                
-                -- เช็คว่างโดยดูว่ามีหนังสืออยู่ในระยะ 3 studs จากจุดที่จะวางหรือไม่
-                local overlapParams = OverlapParams.new()
-                overlapParams.FilterDescendantsInstances = {obj, LocalPlayer.Character}
-                overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
-                
-                local parts = Workspace:GetPartBoundsInRadius(targetPos, 3, overlapParams)
-                local empty = true
-                for _, p in pairs(parts) do
-                    if isBook(p) then
-                        empty = false
-                        break
+    local shelfFolder = Workspace:FindFirstChild("BookShelves (5008Books)") 
+        or Workspace:FindFirstChild("BookShelves")
+    
+    local objectsToScan = {}
+    
+    if shelfFolder then
+        -- วนลูปแบบเจาะจงใน Folder ชั้นวาง (เร็วกว่า GetDescendants ทั้ง Workspace)
+        for _, categoryFolder in pairs(shelfFolder:GetChildren()) do
+            if categoryFolder:IsA("Folder") then
+                for _, obj in pairs(categoryFolder:GetChildren()) do
+                    if isShelf(obj) then
+                        table.insert(objectsToScan, obj)
                     end
-                end
-                
-                if empty then
-                    table.insert(list, {shelf = obj, dist = d})
                 end
             end
         end
+        if Config.Debug then
+            print("📁 พบ Folder ชั้นวาง:", shelfFolder.Name, "| สแกนชั้น:", #objectsToScan)
+        end
+    else
+        -- Fallback: ใช้ GetDescendants ถ้าไม่เจอ Folder
+        for _, obj in pairs(Workspace:GetDescendants()) do
+            if isShelf(obj) then
+                table.insert(objectsToScan, obj)
+            end
+        end
+        if Config.Debug then
+            print("⚠️ ไม่พบ Folder BookShelves, ใช้ GetDescendants | ชั้นทั้งหมดในแมพ:", #objectsToScan)
+        end
     end
+
+    for _, obj in pairs(objectsToScan) do
+        local d = (obj.Position - hrp.Position).Magnitude
+        if d <= Config.ShelfRadius then
+            -- ✅ ไม่ใช้ GetPartBoundsInRadius อีกต่อไป (เพราะมักมีบั๊ก)
+            -- ถ้าต้องการเช็คว่างจริงๆ ให้ดูจาก Config.SkipOccupiedCheck
+            local isEmpty = true
+            
+            if not Config.SkipOccupiedCheck then
+                -- วิธีเช็คแบบง่าย: ดูว่ามีหนังสืออยู่ใน children ของชั้นหรือไม่
+                -- (บางแมพหนังสือจะเป็น children ของชั้น)
+                for _, child in pairs(obj:GetChildren()) do
+                    if isBook(child) then
+                        isEmpty = false
+                        break
+                    end
+                end
+            end
+            
+            if isEmpty then
+                table.insert(list, {shelf = obj, dist = d})
+            end
+        end
+    end
+    
     table.sort(list, function(a, b) return a.dist < b.dist end)
     return list
+end
+
+local function getPlaceOffset(shelf)
+    if Config.PlaceOffset then
+        return Config.PlaceOffset
+    end
+    -- คำนวณอัตโนมัติจากขนาดชั้น (จาก JSON ชั้นสูง ~11.25)
+    if shelf and shelf:IsA("BasePart") then
+        return (shelf.Size.Y / 2) + 1.5
+    end
+    return 6 -- default ถ้าหาขนาดไม่เจอ
 end
 
 local function tweenBook(book, shelf)
     if not book or not shelf or not book.Parent then return false end
     if not shelf.Parent then return false end
 
-    local targetCF = shelf.CFrame * CFrame.new(0, Config.PlaceOffset, 0) * CFrame.Angles(0, math.rad(90), 0)
+    local offset = getPlaceOffset(shelf)
+    local targetCF = shelf.CFrame * CFrame.new(0, offset, 0) * CFrame.Angles(0, math.rad(90), 0)
     local dist = (book.Position - targetCF.Position).Magnitude
     local duration = math.max(0.3, dist / (20 * Config.Speed))
 
@@ -528,13 +573,22 @@ local function mainLoop()
 
         isRunning = true
         local hrp = getHRP()
-        if not hrp then isRunning = false; continue end
+        if not hrp then 
+            isRunning = false
+            if Config.Debug then print("❌ ไม่พบ HRP") end
+            continue 
+        end
 
         local books = scanBooks()
         local shelves = scanShelves()
 
         UI.bookCount.Text = "📖 หนังสือ: " .. #books
         UI.shelfCount.Text = "🗄️ ชั้นวางว่าง: " .. #shelves
+
+        if Config.Debug then
+            print(string.format("📊 สแกน: หนังสือ %d เล่ม | ชั้นวาง %d ชิ้น (ระยะ %d)", 
+                #books, #shelves, Config.ShelfRadius))
+        end
 
         if #books > 0 and #shelves > 0 then
             UI.statusLabel.Text = "📦 กำลังจัดเก็บ " .. #books .. " เล่ม..."
@@ -545,7 +599,10 @@ local function mainLoop()
                 if not data.book.Parent then continue end
 
                 if #shelves == 0 then shelves = scanShelves() end
-                if #shelves == 0 then break end
+                if #shelves == 0 then 
+                    UI.statusLabel.Text = "⚠️ ชั้นวางเต็มหมดแล้ว!"
+                    break 
+                end
 
                 local shelfData = shelves[1]
                 if not shelfData or not shelfData.shelf.Parent then
@@ -553,27 +610,29 @@ local function mainLoop()
                     continue
                 end
 
-                -- Double check empty
-                local targetCF = shelfData.shelf.CFrame * CFrame.new(0, Config.PlaceOffset, 0)
-                local targetPos = targetCF.Position
+                -- Double check ก่อนวาง (แบบง่าย)
                 local stillEmpty = true
-                
-                local overlapParams = OverlapParams.new()
-                overlapParams.FilterDescendantsInstances = {shelfData.shelf, LocalPlayer.Character}
-                overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
-                local parts = Workspace:GetPartBoundsInRadius(targetPos, 3, overlapParams)
-                for _, p in pairs(parts) do
-                    if isBook(p) then stillEmpty = false; break end
+                if not Config.SkipOccupiedCheck then
+                    for _, child in pairs(shelfData.shelf:GetChildren()) do
+                        if isBook(child) then 
+                            stillEmpty = false
+                            break 
+                        end
+                    end
                 end
 
                 if stillEmpty then
                     local ok = tweenBook(data.book, shelfData.shelf)
                     if ok then
                         UI.statusLabel.Text = "✅ จัดเก็บเล่มที่ " .. i .. " สำเร็จ"
+                        if Config.Debug then
+                            print("✅ วางหนังสือบน", shelfData.shelf.Name, "ที่", tostring(shelfData.shelf.Position))
+                        end
                         task.wait(0.3)
                         table.remove(shelves, 1)
                     end
                 else
+                    if Config.Debug then print("⚠️ ชั้น", shelfData.shelf.Name, "มีหนังสือแล้ว ข้าม") end
                     table.remove(shelves, 1)
                 end
                 task.wait(0.2)
@@ -600,7 +659,12 @@ end
 -- ═══════════════════════════════════════════════
 task.spawn(mainLoop)
 updateToggle()
-UI.statusLabel.Text = "✨ พร้อมใช้งาน! กดปุ่ม ON เพื่อเริ่ม (รัศมีชั้น: " .. Config.ShelfRadius .. ")"
+
+-- สแกนครั้งแรกเพื่อแสดงสถานะ
+local initShelves = scanShelves()
+UI.statusLabel.Text = "✨ พร้อมใช้งาน! เจอชั้นวาง " .. #initShelves .. " ชิ้น (รัศมี: " .. Config.ShelfRadius .. ")"
 UI.statusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
 
-print("✅ Delta Auto Shelf FIXED Loaded | รองรับ BookShelf10/13/15 | รัศมี:", Config.ShelfRadius)
+print("✅ Delta Auto Shelf JSON-FIXED V2 Loaded")
+print("📚 ชั้นวางที่เจอ:", #initShelves, "ชิ้น")
+print("💡 ถ้ายังไม่เจอชั้น ให้เพิ่ม ShelfRadius หรือเดินเข้าใกล้ชั้นวาง")
