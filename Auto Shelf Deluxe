@@ -1,670 +1,764 @@
--- ═══════════════════════════════════════════════
--- 📚 Delta Auto Shelf Deluxe (JSON-FIXED V2)
--- แก้ไขตามโครงสร้างจริงจาก Workspace JSON dump
--- ═══════════════════════════════════════════════
+-- Auto Book Collection Script + UI
+-- Author: BluezyGPT | For BZMEMBER
+-- Usage: Paste in LocalScript inside StarterCharacterScripts or StarterPlayerScripts
 
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 
-local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
 
--- ═══════════════════════════════════════════════
--- CONFIGURATION
--- ═══════════════════════════════════════════════
-getgenv().AutoShelfConfig = getgenv().AutoShelfConfig or {
-    Enabled = false,
-    ScanRadius = 50,
-    ShelfRadius = 2000,
-    Speed = 1.0,
-    PlaceOffset = nil, -- ปล่อย nil ให้คำนวณอัตโนมัติจากขนาดชั้น
-    ProcessedBooks = {},
-    Debug = true, -- เปิด Debug print
-    SkipOccupiedCheck = true, -- ข้ามการเช็คว่าง (แก้ปัญหาหลัก!)
+-- Configuration
+local CONFIG = {
+    CollectionRadius = 30,           -- ระยะเก็บหนังสือ ( studs )
+    CollectionInterval = 0.1,        -- ช่วงเวลาระหว่างการเก็บ ( วินาที )
+    HighlightColor = Color3.fromRGB(0, 255, 200),
+    HighlightTransparency = 0.5,
+    AutoCollect = true,
+    ShowESP = false,
+    ShowDistance = true,
 }
 
-local Config = getgenv().AutoShelfConfig
+-- State
+local collectionLoop = nil
+local espConnections = {}
+local gui = nil
 
--- Force reset ถ้าเป็น default เก่า
-if Config.ShelfRadius == 80 then Config.ShelfRadius = 2000 end
-if Config.PlaceOffset == 1.1 then Config.PlaceOffset = nil end
-
-local BOOK_MESH_ID = "rbxassetid://131573217673056"
-
-local SHELF_MESH_IDS = {
-    ["rbxassetid://113241345681988"] = true, -- BookShelf10
-    ["rbxassetid://111558057440478"] = true, -- BookShelf13
-    ["rbxassetid://112357180449332"] = true, -- BookShelf15
-}
-
-local isRunning = false
-local draggingUI = false
-local dragStart = nil
-local startPos = nil
-
--- ═══════════════════════════════════════════════
--- UI CREATION (เหมือนเดิม)
--- ═══════════════════════════════════════════════
+-- ==========================
+-- UI SYSTEM
+-- ==========================
 local function createUI()
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "DeltaAutoShelfUI"
+    -- Remove existing
+    if gui then gui:Destroy() end
+
+    gui = Instance.new("ScreenGui")
+    gui.Name = "BookCollectorUI"
     gui.ResetOnSpawn = false
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-    local main = Instance.new("Frame")
-    main.Name = "MainFrame"
-    main.Size = UDim2.new(0, 360, 0, 430)
-    main.Position = UDim2.new(0.5, -180, 0.5, -215)
-    main.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
-    main.BackgroundTransparency = 0.05
-    main.BorderSizePixel = 0
-    main.Active = true
-    main.Parent = gui
+    -- Main Frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 280, 0, 380)
+    mainFrame.Position = UDim2.new(0.5, -140, 0, 30)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Visible = true
+    mainFrame.Parent = gui
 
+    -- Corner
     local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 14)
-    corner.Parent = main
+    corner.CornerScale = UDim2.new(0, 12)
+    corner.Parent = mainFrame
 
+    -- Stroke
     local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(80, 160, 255)
-    stroke.Thickness = 2.5
-    stroke.Parent = main
+    stroke.Color = Color3.fromRGB(80, 60, 180)
+    stroke.Thickness = 2
+    stroke.Transparency = 0.3
+    stroke.Parent = mainFrame
 
-    local gradient = Instance.new("UIGradient")
-    gradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 30, 35)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 20, 40))
-    })
-    gradient.Rotation = 45
-    gradient.Parent = main
-
+    -- Title Bar
     local titleBar = Instance.new("Frame")
-    titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 45)
-    titleBar.BackgroundColor3 = Color3.fromRGB(35, 40, 55)
+    titleBar.Size = UDim2.new(1, 0, 0, 36)
+    titleBar.BackgroundColor3 = Color3.fromRGB(40, 30, 80)
     titleBar.BorderSizePixel = 0
-    titleBar.Parent = main
+    titleBar.Parent = mainFrame
 
     local titleCorner = Instance.new("UICorner")
-    titleCorner.CornerRadius = UDim.new(0, 14)
+    titleCorner.CornerScale = UDim2.new(0, 12)
     titleCorner.Parent = titleBar
 
-    local fixFrame = Instance.new("Frame")
-    fixFrame.Size = UDim2.new(1, 0, 0, 10)
-    fixFrame.Position = UDim2.new(0, 0, 1, -10)
-    fixFrame.BackgroundColor3 = Color3.fromRGB(35, 40, 55)
-    fixFrame.BorderSizePixel = 0
-    fixFrame.Parent = titleBar
+    -- Title text only on top corners
+    local titleTopCorner = Instance.new("UICorner")
+    titleTopCorner.CornerScale = UDim2.new(0, 12)
+    titleTopCorner.Parent = titleBar
 
-    local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Size = UDim2.new(1, -60, 1, 0)
-    title.Position = UDim2.new(0, 15, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "📚 Auto Shelf Deluxe"
-    title.TextColor3 = Color3.fromRGB(200, 225, 255)
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 20
-    title.Parent = titleBar
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -50, 1, 0)
+    titleLabel.Position = UDim2.new(0, 12, 0, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "📚 Book Collector"
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleLabel.TextSize = 16
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Parent = titleBar
 
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Name = "CloseBtn"
-    closeBtn.Size = UDim2.new(0, 32, 0, 32)
-    closeBtn.Position = UDim2.new(1, -40, 0.5, -16)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
-    closeBtn.Text = "X"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 16
-    closeBtn.Parent = titleBar
-    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+    -- Drag functionality
+    local dragging = false
+    local dragInput, mousePos, framePos
 
-    local floatBtn = Instance.new("TextButton")
-    floatBtn.Name = "FloatToggle"
-    floatBtn.Size = UDim2.new(0, 50, 0, 50)
-    floatBtn.Position = UDim2.new(0, 20, 0.5, -25)
-    floatBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 220)
-    floatBtn.Text = "📚"
-    floatBtn.TextSize = 24
-    floatBtn.Font = Enum.Font.GothamBold
-    floatBtn.Visible = false
-    floatBtn.Parent = gui
-    Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(1, 0)
-    local floatStroke = Instance.new("UIStroke", floatBtn)
-    floatStroke.Color = Color3.fromRGB(100, 180, 255)
-    floatStroke.Thickness = 3
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            mousePos = input.Position
+            framePos = mainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
 
+    titleBar.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - mousePos
+            mainFrame.Position = UDim2.new(
+                framePos.X.Scale,
+                framePos.X.Offset + delta.X,
+                framePos.Y.Scale,
+                framePos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    -- Content Area
     local content = Instance.new("Frame")
     content.Name = "Content"
-    content.Size = UDim2.new(1, -30, 1, -60)
-    content.Position = UDim2.new(0, 15, 0, 55)
+    content.Size = UDim2.new(1, -16, 1, -52)
+    content.Position = UDim2.new(0, 8, 0, 44)
     content.BackgroundTransparency = 1
-    content.Parent = main
+    content.Parent = mainFrame
 
     local listLayout = Instance.new("UIListLayout")
-    listLayout.Padding = UDim.new(0, 12)
+    listLayout.Padding = UDim.new(0, 6)
     listLayout.SortOrder = Enum.SortOrder.LayoutOrder
     listLayout.Parent = content
 
-    local toggleFrame = Instance.new("Frame")
-    toggleFrame.Size = UDim2.new(1, 0, 0, 50)
-    toggleFrame.BackgroundTransparency = 1
-    toggleFrame.Parent = content
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 4)
+    padding.PaddingRight = UDim.new(0, 4)
+    padding.Parent = content
 
-    local toggleLabel = Instance.new("TextLabel")
-    toggleLabel.Size = UDim2.new(0.5, 0, 1, 0)
-    toggleLabel.BackgroundTransparency = 1
-    toggleLabel.Text = "Auto Shelf"
-    toggleLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
-    toggleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    toggleLabel.Font = Enum.Font.GothamSemibold
-    toggleLabel.TextSize = 16
-    toggleLabel.Parent = toggleFrame
+    -- Scrolling
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.Position = UDim2.new(0, 0, 0, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(80, 60, 180)
+    scroll.Parent = content
 
-    local toggleBtn = Instance.new("TextButton")
-    toggleBtn.Name = "ToggleBtn"
-    toggleBtn.Size = UDim2.new(0, 80, 0, 36)
-    toggleBtn.Position = UDim2.new(1, -80, 0.5, -18)
-    toggleBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
-    toggleBtn.Text = "OFF"
-    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    toggleBtn.Font = Enum.Font.GothamBold
-    toggleBtn.TextSize = 14
-    toggleBtn.AutoButtonColor = false
-    toggleBtn.Parent = toggleFrame
-    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 18)
+    local scrollList = Instance.new("UIListLayout")
+    scrollList.Padding = UDim.new(0, 6)
+    scrollList.Parent = scroll
+
+    -- Helper to create option button
+    local function createOption(parent, label, default, callback)
+        local container = Instance.new("Frame")
+        container.Size = UDim2.new(1, 0, 0, 32)
+        container.BackgroundColor3 = Color3.fromRGB(30, 25, 55)
+        container.BorderSizePixel = 0
+        container.Parent = parent
+
+        local contCorner = Instance.new("UICorner")
+        contCorner.CornerScale = UDim2.new(0, 8)
+        contCorner.Parent = container
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0.6, -8, 1, 0)
+        lbl.Position = UDim2.new(0, 8, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = label
+        lbl.TextColor3 = Color3.fromRGB(200, 200, 220)
+        lbl.TextSize = 13
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = container
+
+        local toggle = Instance.new("TextButton")
+        toggle.Size = UDim2.new(0, 44, 0, 22)
+        toggle.Position = UDim2.new(1, -52, 0, 5)
+        toggle.BackgroundColor3 = default and CONFIG.HighlightColor or Color3.fromRGB(60, 60, 80)
+        toggle.BorderSizePixel = 0
+        toggle.Text = default and "ON" or "OFF"
+        toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+        toggle.TextSize = 11
+        toggle.Font = Enum.Font.GothamBold
+        toggle.Parent = container
+
+        local togCorner = Instance.new("UICorner")
+        togCorner.CornerScale = UDim2.new(0, 6)
+        togCorner.Parent = toggle
+
+        local state = { value = default }
+
+        toggle.MouseButton1Click:Connect(function()
+            state.value = not state.value
+            toggle.BackgroundColor3 = state.value and CONFIG.HighlightColor or Color3.fromRGB(60, 60, 80)
+            toggle.Text = state.value and "ON" or "OFF"
+            if callback then callback(state.value) end
+        end)
+
+        return state
+    end
+
+    -- Helper for slider
+    local function createSlider(parent, label, min, max, default, callback)
+        local container = Instance.new("Frame")
+        container.Size = UDim2.new(1, 0, 0, 48)
+        container.BackgroundColor3 = Color3.fromRGB(30, 25, 55)
+        container.BorderSizePixel = 0
+        container.Parent = parent
+
+        local contCorner = Instance.new("UICorner")
+        contCorner.CornerScale = UDim2.new(0, 8)
+        contCorner.Parent = container
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -16, 0, 18)
+        lbl.Position = UDim2.new(0, 8, 0, 4)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = label
+        lbl.TextColor3 = Color3.fromRGB(200, 200, 220)
+        lbl.TextSize = 12
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = container
+
+        local valLbl = Instance.new("TextLabel")
+        valLbl.Size = UDim2.new(0, 50, 0, 18)
+        valLbl.Position = UDim2.new(1, -58, 0, 4)
+        valLbl.BackgroundTransparency = 1
+        valLbl.Text = tostring(default)
+        valLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
+        valLbl.TextSize = 12
+        valLbl.Font = Enum.Font.GothamBold
+        valLbl.TextXAlignment = Enum.TextXAlignment.Right
+        valLbl.Parent = container
+
+        local sliderBg = Instance.new("Frame")
+        sliderBg.Size = UDim2.new(1, -16, 0, 8)
+        sliderBg.Position = UDim2.new(0, 8, 0, 28)
+        sliderBg.BackgroundColor3 = Color3.fromRGB(50, 45, 75)
+        sliderBg.BorderSizePixel = 0
+        sliderBg.Parent = container
+
+        local sliderCorner = Instance.new("UICorner")
+        sliderCorner.CornerScale = UDim2.new(0, 4)
+        sliderCorner.Parent = sliderBg
+
+        local sliderFill = Instance.new("Frame")
+        sliderFill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+        sliderFill.Position = UDim2.new(0, 0, 0, 0)
+        sliderFill.BackgroundColor3 = CONFIG.HighlightColor
+        sliderFill.BorderSizePixel = 0
+        sliderFill.Parent = sliderBg
+
+        local fillCorner = Instance.new("UICorner")
+        fillCorner.CornerScale = UDim2.new(0, 4)
+        fillCorner.Parent = sliderFill
+
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.new(0, 14, 0, 14)
+        knob.Position = UDim2.new((default - min) / (max - min), 0, 0, -3)
+        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        knob.BorderSizePixel = 0
+        knob.ZIndex = 2
+        knob.Parent = sliderBg
+
+        local knobCorner = Instance.new("UICorner")
+        knobCorner.CornerScale = UDim2.new(0.5, 0)
+        knobCorner.Parent = knob
+
+        local dragging = false
+
+        local function update(input)
+            local ratio = math.clamp((input.Position.X - sliderBg.AbsolutePosition.X) / sliderBg.AbsoluteSize.X, 0, 1)
+            local val = math.floor(min + ratio * (max - min))
+            sliderFill.Size = UDim2.new(ratio, 0, 1, 0)
+            knob.Position = UDim2.new(ratio, 0, 0, -3)
+            valLbl.Text = tostring(val)
+            if callback then callback(val) end
+        end
+
+        sliderBg.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = true
+                update(input)
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                update(input)
+            end
+        end)
+
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging = false
+            end
+        end)
+    end
+
+    -- Options
+    createOption(scroll, "Auto Collect", CONFIG.AutoCollect, function(v)
+        CONFIG.AutoCollect = v
+        if v then startCollection() else stopCollection() end
+    end)
+
+    createOption(scroll, "Show ESP", CONFIG.ShowESP, function(v)
+        CONFIG.ShowESP = v
+        if v then startESP() else stopESP() end
+    end)
+
+    createOption(scroll, "Show Distance", CONFIG.ShowDistance, function(v)
+        CONFIG.ShowDistance = v
+        updateAllBillboards()
+    end)
+
+    createSlider(scroll, "Collection Radius", 5, 100, CONFIG.CollectionRadius, function(v)
+        CONFIG.CollectionRadius = v
+    end)
+
+    createSlider(scroll, "Collection Speed", 1, 20, math.floor(1/CONFIG.CollectionInterval), function(v)
+        CONFIG.CollectionInterval = 1 / v
+        if collectionLoop then
+            stopCollection()
+            startCollection()
+        end
+    end)
+
+    -- Status Label
+    local statusFrame = Instance.new("Frame")
+    statusFrame.Size = UDim2.new(1, -16, 0, 28)
+    statusFrame.Position = UDim2.new(0, 8, 1, -36)
+    statusFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 30)
+    statusFrame.BorderSizePixel = 0
+    statusFrame.Parent = mainFrame
+
+    local statusCorner = Instance.new("UICorner")
+    statusCorner.CornerScale = UDim2.new(0, 6)
+    statusCorner.Parent = statusFrame
 
     local statusLabel = Instance.new("TextLabel")
-    statusLabel.Name = "StatusLabel"
-    statusLabel.Size = UDim2.new(1, 0, 0, 24)
+    statusLabel.Size = UDim2.new(1, 0, 1, 0)
     statusLabel.BackgroundTransparency = 1
-    statusLabel.Text = "⏳ รอการเปิดใช้งาน..."
-    statusLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.Text = "Status: Ready"
+    statusLabel.TextColor3 = Color3.fromRGB(0, 255, 200)
+    statusLabel.TextSize = 12
     statusLabel.Font = Enum.Font.Gotham
-    statusLabel.TextSize = 14
-    statusLabel.Parent = content
+    statusLabel.Parent = statusFrame
 
-    local statsFrame = Instance.new("Frame")
-    statsFrame.Size = UDim2.new(1, 0, 0, 60)
-    statsFrame.BackgroundColor3 = Color3.fromRGB(30, 35, 45)
-    statsFrame.BorderSizePixel = 0
-    statsFrame.Parent = content
-    Instance.new("UICorner", statsFrame).CornerRadius = UDim.new(0, 10)
+    -- Minimize button
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.new(0, 24, 0, 24)
+    minBtn.Position = UDim2.new(1, -30, 0, 6)
+    minBtn.BackgroundColor3 = Color3.fromRGB(60, 50, 100)
+    minBtn.BorderSizePixel = 0
+    minBtn.Text = "−"
+    minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minBtn.TextSize = 16
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.ZIndex = 5
+    minBtn.Parent = titleBar
 
-    local bookCount = Instance.new("TextLabel")
-    bookCount.Name = "BookCount"
-    bookCount.Size = UDim2.new(0.5, 0, 1, 0)
-    bookCount.BackgroundTransparency = 1
-    bookCount.Text = "📖 หนังสือ: 0"
-    bookCount.TextColor3 = Color3.fromRGB(100, 200, 255)
-    bookCount.Font = Enum.Font.GothamBold
-    bookCount.TextSize = 14
-    bookCount.Parent = statsFrame
+    local minCorner = Instance.new("UICorner")
+    minCorner.CornerScale = UDim2.new(0, 6)
+    minCorner.Parent = minBtn
 
-    local shelfCount = Instance.new("TextLabel")
-    shelfCount.Name = "ShelfCount"
-    shelfCount.Size = UDim2.new(0.5, 0, 1, 0)
-    shelfCount.Position = UDim2.new(0.5, 0, 0, 0)
-    shelfCount.BackgroundTransparency = 1
-    shelfCount.Text = "🗄️ ชั้นวาง: 0"
-    shelfCount.TextColor3 = Color3.fromRGB(100, 255, 180)
-    shelfCount.Font = Enum.Font.GothamBold
-    shelfCount.TextSize = 14
-    shelfCount.Parent = statsFrame
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        local targetHeight = minimized and 36 or 380
+        TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quint),
+            {Size = UDim2.new(0, 280, 0, targetHeight)}):Play()
+        content.Visible = not minimized
+        statusFrame.Visible = not minimized
+        minBtn.Text = minimized and "+" or "−"
+    end)
 
-    local distFrame = Instance.new("Frame")
-    distFrame.Size = UDim2.new(1, 0, 0, 50)
-    distFrame.BackgroundTransparency = 1
-    distFrame.Parent = content
+    -- Close button
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position = UDim2.new(1, -30, 0, 6)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.TextSize = 14
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.ZIndex = 5
+    closeBtn.Parent = titleBar
 
-    local distLabel = Instance.new("TextLabel")
-    distLabel.Size = UDim2.new(1, 0, 0, 20)
-    distLabel.BackgroundTransparency = 1
-    distLabel.Text = "🔍 ระยะสแกนหนังสือ: 50"
-    distLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    distLabel.TextXAlignment = Enum.TextXAlignment.Left
-    distLabel.Font = Enum.Font.Gotham
-    distLabel.TextSize = 14
-    distLabel.Parent = distFrame
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerScale = UDim2.new(0, 6)
+    closeCorner.Parent = closeBtn
 
-    local distTrack = Instance.new("Frame")
-    distTrack.Size = UDim2.new(1, 0, 0, 8)
-    distTrack.Position = UDim2.new(0, 0, 0, 32)
-    distTrack.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-    distTrack.BorderSizePixel = 0
-    distTrack.Parent = distFrame
-    Instance.new("UICorner", distTrack).CornerRadius = UDim.new(1, 0)
+    closeBtn.MouseButton1Click:Connect(function()
+        mainFrame.Visible = false
+        -- Show reopen hint
+        showReopenHint()
+    end)
 
-    local distFill = Instance.new("Frame")
-    distFill.Size = UDim2.new(0.25, 0, 1, 0)
-    distFill.BackgroundColor3 = Color3.fromRGB(80, 160, 255)
-    distFill.BorderSizePixel = 0
-    distFill.Parent = distTrack
-    Instance.new("UICorner", distFill).CornerRadius = UDim.new(1, 0)
+    -- Layout update
+    RunService.RenderStepped:Connect(function()
+        scroll.CanvasSize = UDim2.new(0, 0, 0, scrollList.AbsoluteContentSize.Y)
+    end)
 
-    local distHandle = Instance.new("Frame")
-    distHandle.Size = UDim2.new(0, 16, 0, 16)
-    distHandle.Position = UDim2.new(0.25, -8, 0.5, -8)
-    distHandle.BackgroundColor3 = Color3.fromRGB(120, 190, 255)
-    distHandle.BorderSizePixel = 0
-    distHandle.Parent = distTrack
-    Instance.new("UICorner", distHandle).CornerRadius = UDim.new(1, 0)
-
-    local speedFrame = Instance.new("Frame")
-    speedFrame.Size = UDim2.new(1, 0, 0, 50)
-    speedFrame.BackgroundTransparency = 1
-    speedFrame.Parent = content
-
-    local speedLabel = Instance.new("TextLabel")
-    speedLabel.Size = UDim2.new(1, 0, 0, 20)
-    speedLabel.BackgroundTransparency = 1
-    speedLabel.Text = "⚡ ความเร็ว Tween: 1.0x"
-    speedLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    speedLabel.TextXAlignment = Enum.TextXAlignment.Left
-    speedLabel.Font = Enum.Font.Gotham
-    speedLabel.TextSize = 14
-    speedLabel.Parent = speedFrame
-
-    local speedTrack = Instance.new("Frame")
-    speedTrack.Size = UDim2.new(1, 0, 0, 8)
-    speedTrack.Position = UDim2.new(0, 0, 0, 32)
-    speedTrack.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-    speedTrack.BorderSizePixel = 0
-    speedTrack.Parent = speedFrame
-    Instance.new("UICorner", speedTrack).CornerRadius = UDim.new(1, 0)
-
-    local speedFill = Instance.new("Frame")
-    speedFill.Size = UDim2.new(0.33, 0, 1, 0)
-    speedFill.BackgroundColor3 = Color3.fromRGB(255, 180, 80)
-    speedFill.BorderSizePixel = 0
-    speedFill.Parent = speedTrack
-    Instance.new("UICorner", speedFill).CornerRadius = UDim.new(1, 0)
-
-    local speedHandle = Instance.new("Frame")
-    speedHandle.Size = UDim2.new(0, 16, 0, 16)
-    speedHandle.Position = UDim2.new(0.33, -8, 0.5, -8)
-    speedHandle.BackgroundColor3 = Color3.fromRGB(255, 200, 120)
-    speedHandle.BorderSizePixel = 0
-    speedHandle.Parent = speedTrack
-    Instance.new("UICorner", speedHandle).CornerRadius = UDim.new(1, 0)
-
-    local infoLabel = Instance.new("TextLabel")
-    infoLabel.Size = UDim2.new(1, 0, 0, 50)
-    infoLabel.BackgroundTransparency = 1
-    infoLabel.Text = "💡 คำแนะนำ:\nหนังสือจะถูกเคลื่อนย้ายไปชั้นวางอัตโนมัติ\n(ไม่ต้องหยิบเอง)"
-    infoLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-    infoLabel.TextWrapped = true
-    infoLabel.TextYAlignment = Enum.TextYAlignment.Top
-    infoLabel.Font = Enum.Font.Gotham
-    infoLabel.TextSize = 12
-    infoLabel.Parent = content
-
+    gui.Parent = player:WaitForChild("PlayerGui")
     return {
-        gui = gui, main = main, floatBtn = floatBtn,
-        toggleBtn = toggleBtn, statusLabel = statusLabel,
-        bookCount = bookCount, shelfCount = shelfCount,
-        distLabel = distLabel, distFill = distFill, distHandle = distHandle,
-        speedLabel = speedLabel, speedFill = speedFill, speedHandle = speedHandle,
-        closeBtn = closeBtn, titleBar = titleBar
+        status = statusLabel,
+        mainFrame = mainFrame,
     }
 end
 
-local UI = createUI()
+local function showReopenHint()
+    local hint = Instance.new("ScreenGui")
+    hint.Name = "ReopenHint"
+    hint.ResetOnSpawn = false
 
--- ═══════════════════════════════════════════════
--- UI LOGIC (เหมือนเดิม)
--- ═══════════════════════════════════════════════
-UI.titleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        draggingUI = true
-        dragStart = input.Position
-        startPos = UI.main.Position
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 120, 0, 36)
+    btn.Position = UDim2.new(0.5, -60, 0, 30)
+    btn.BackgroundColor3 = Color3.fromRGB(40, 30, 80)
+    btn.BorderSizePixel = 0
+    btn.Text = "📚 Open Menu"
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 14
+    btn.Font = Enum.Font.GothamBold
+    btn.Parent = hint
+
+    local corner = Instance.new("UICorner")
+    corner.CornerScale = UDim2.new(0, 12)
+    corner.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        if gui then
+            gui:FindFirstChild("MainFrame").Visible = true
+        end
+        hint:Destroy()
+    end)
+
+    hint.Parent = player:WaitForChild("PlayerGui")
+end
+
+-- ==========================
+-- BOOK DETECTION
+-- ==========================
+local function findBooks()
+    local books = {}
+    local char = player.Character
+    if not char then return books end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return books end
+
+    local rootPos = hrp.Position
+
+    -- Search in workspace for book-like parts/models
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        local name = obj.Name:lower()
+        local isBook = name:find("book") or name:find("note") or name:find("page") or name:find("scroll")
+
+        if isBook and obj:IsA("BasePart") then
+            local dist = (obj.Position - rootPos).Magnitude
+            if dist <= CONFIG.CollectionRadius then
+                table.insert(books, { part = obj, distance = dist })
+            end
+        end
     end
-end)
 
-UserInputService.InputChanged:Connect(function(input)
-    if draggingUI and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local delta = input.Position - dragStart
-        UI.main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    -- Also check for models with "Book" in name
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and (obj.Name:lower():find("book") or obj.Name:lower():find("collect")) then
+            local primary = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+            if primary then
+                local dist = (primary.Position - rootPos).Magnitude
+                if dist <= CONFIG.CollectionRadius then
+                    local exists = false
+                    for _, b in ipairs(books) do
+                        if b.part == primary then exists = true break end
+                    end
+                    if not exists then
+                        table.insert(books, { part = primary, distance = dist, model = obj })
+                    end
+                end
+            end
+        end
     end
-end)
 
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        draggingUI = false
-    end
-end)
+    table.sort(books, function(a, b) return a.distance < b.distance end)
+    return books
+end
 
-UI.closeBtn.MouseButton1Click:Connect(function()
-    UI.main.Visible = false
-    UI.floatBtn.Visible = true
-end)
+-- ==========================
+-- ESP SYSTEM
+-- ==========================
+local espParts = {}
 
-UI.floatBtn.MouseButton1Click:Connect(function()
-    UI.main.Visible = true
-    UI.floatBtn.Visible = false
-end)
+local function createBillboard(part, text)
+    local bb = Instance.new("BillboardGui")
+    bb.Size = UDim2.new(0, 120, 0, 30)
+    bb.StudsOffset = Vector3.new(0, 2, 0)
+    bb.AlwaysOnTop = true
+    bb.Parent = part
 
-local function updateToggle()
-    if Config.Enabled then
-        UI.toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 200, 120)
-        UI.toggleBtn.Text = "ON"
-        UI.statusLabel.Text = "🟢 กำลังทำงาน..."
-        UI.statusLabel.TextColor3 = Color3.fromRGB(100, 255, 150)
-    else
-        UI.toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-        UI.toggleBtn.Text = "OFF"
-        UI.statusLabel.Text = "🔴 หยุดการทำงาน"
-        UI.statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = CONFIG.HighlightColor
+    label.TextSize = 12
+    label.Font = Enum.Font.GothamBold
+    label.TextStrokeTransparency = 0.5
+    label.Parent = bb
+
+    return bb
+end
+
+local function updateAllBillboards()
+    for part, bb in pairs(espParts) do
+        if part.Parent and bb then
+            local label = bb:FindFirstChildWhichIsA("TextLabel")
+            if label then
+                local char = player.Character
+                if char then
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local dist = math.floor((part.Position - hrp.Position).Magnitude)
+                        label.Text = CONFIG.ShowDistance and ("📚 %dm"):format(dist) or "📚 Book"
+                    end
+                end
+            end
+        end
     end
 end
 
-UI.toggleBtn.MouseButton1Click:Connect(function()
-    Config.Enabled = not Config.Enabled
-    getgenv().AutoShelfEnabled = Config.Enabled
-    updateToggle()
-end)
+local function startESP()
+    stopESP()
+    local books = findBooks()
+    for _, book in ipairs(books) do
+        if not espParts[book.part] then
+            local bb = createBillboard(book.part, ("📚 %dm"):format(math.floor(book.distance)))
+            espParts[book.part] = bb
 
-local function setupSlider(track, handle, fill, label, configKey, min, max, prefix, isFloat)
-    local draggingSlider = false
-    local function update(x)
-        local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-        local val = isFloat and (min + (max - min) * rel) or math.floor(min + (max - min) * rel)
-        if isFloat then val = math.floor(val * 10) / 10 end
-        Config[configKey] = val
-        handle.Position = UDim2.new(rel, -8, 0.5, -8)
-        fill.Size = UDim2.new(rel, 0, 1, 0)
-        label.Text = prefix .. tostring(val) .. (isFloat and "x" or "")
+            -- Highlight
+            local highlight = Instance.new("Highlight")
+            highlight.FillColor = CONFIG.HighlightColor
+            highlight.OutlineColor = CONFIG.HighlightColor
+            highlight.OutlineTransparency = 0
+            highlight.FillTransparency = CONFIG.HighlightTransparency
+            highlight.Parent = book.part
+
+            espParts[book.part].__highlight = highlight
+
+            -- Cleanup when part removed
+            local conn
+            conn = book.part.AncestryChanged:Connect(function()
+                if not book.part:IsDescendantOf(game) then
+                    if espParts[book.part] then
+                        espParts[book.part]:Destroy()
+                        if espParts[book.part].__highlight then
+                            espParts[book.part].__highlight:Destroy()
+                        end
+                        espParts[book.part] = nil
+                    end
+                    conn:Disconnect()
+                end
+            end)
+        end
     end
-    handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            draggingSlider = true
-        end
-    end)
-    track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            update(input.Position.X)
-            draggingSlider = true
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            update(input.Position.X)
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            draggingSlider = false
-        end
-    end)
-    local initRel = (Config[configKey] - min) / (max - min)
-    handle.Position = UDim2.new(initRel, -8, 0.5, -8)
-    fill.Size = UDim2.new(initRel, 0, 1, 0)
 end
 
-setupSlider(UI.distFill.Parent, UI.distHandle, UI.distFill, UI.distLabel, "ScanRadius", 10, 200, "🔍 ระยะสแกนหนังสือ: ", false)
-setupSlider(UI.speedFill.Parent, UI.speedHandle, UI.speedFill, UI.speedLabel, "Speed", 0.1, 3.0, "⚡ ความเร็ว Tween: ", true)
-
--- ═══════════════════════════════════════════════
--- CORE FUNCTIONS (JSON-FIXED)
--- ═══════════════════════════════════════════════
-
-local function getHRP()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
+local function stopESP()
+    for part, bb in pairs(espParts) do
+        if bb then
+            bb:Destroy()
+        end
+        if espParts[part].__highlight then
+            espParts[part].__highlight:Destroy()
+        end
+    end
+    espParts = {}
 end
 
-local function isBook(obj)
-    if not obj or not obj.Parent then return false end
-    if not obj:IsA("MeshPart") then return false end
-    if obj.MeshId ~= BOOK_MESH_ID then return false end
-    if obj:IsDescendantOf(LocalPlayer.Character) then return false end
+-- ==========================
+-- AUTO COLLECTION
+-- ==========================
+local function collectBook(book)
+    local char = player.Character
+    if not char then return false end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    -- Try to walk to the book
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+
+    local targetPos = book.part.Position
+    targetPos = Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
+
+    -- Move toward book
+    local direction = (targetPos - hrp.Position).Unit
+    humanoid:Move(direction * 16, true)
+
     return true
 end
 
--- ✅ แก้ไข: รองรับชื่อ BookShelf10/13/15 + MeshId
-local function isShelf(obj)
-    if not obj or not obj.Parent then return false end
-    if not (obj:IsA("MeshPart") or obj:IsA("BasePart")) then return false end
-    
-    -- เช็คชื่อ
-    if obj.Name:match("^BookShelf%d+$") then
-        return true
-    end
-    
-    -- เช็ค MeshId สำรอง
-    if obj:IsA("MeshPart") and obj.MeshId then
-        return SHELF_MESH_IDS[obj.MeshId] == true
-    end
-    
-    return false
-end
+local function startCollection()
+    stopCollection()
 
-local function scanBooks()
-    local list = {}
-    local hrp = getHRP()
-    if not hrp then return list end
-    for _, obj in pairs(Workspace:GetDescendants()) do
-        if isBook(obj) then
-            local d = (obj.Position - hrp.Position).Magnitude
-            if d <= Config.ScanRadius then
-                table.insert(list, {book = obj, dist = d})
-            end
-        end
-    end
-    table.sort(list, function(a, b) return a.dist < b.dist end)
-    return list
-end
-
--- ✅ แก้ไขหลัก: ค้นหาชั้นวางจาก Folder "BookShelves" โดยตรง + ไม่ใช้ GetPartBoundsInRadius
-local function scanShelves()
-    local list = {}
-    local hrp = getHRP()
-    if not hrp then return list end
-
-    local shelfFolder = Workspace:FindFirstChild("BookShelves (5008Books)") 
-        or Workspace:FindFirstChild("BookShelves")
-    
-    local objectsToScan = {}
-    
-    if shelfFolder then
-        -- วนลูปแบบเจาะจงใน Folder ชั้นวาง (เร็วกว่า GetDescendants ทั้ง Workspace)
-        for _, categoryFolder in pairs(shelfFolder:GetChildren()) do
-            if categoryFolder:IsA("Folder") then
-                for _, obj in pairs(categoryFolder:GetChildren()) do
-                    if isShelf(obj) then
-                        table.insert(objectsToScan, obj)
-                    end
-                end
-            end
-        end
-        if Config.Debug then
-            print("📁 พบ Folder ชั้นวาง:", shelfFolder.Name, "| สแกนชั้น:", #objectsToScan)
-        end
-    else
-        -- Fallback: ใช้ GetDescendants ถ้าไม่เจอ Folder
-        for _, obj in pairs(Workspace:GetDescendants()) do
-            if isShelf(obj) then
-                table.insert(objectsToScan, obj)
-            end
-        end
-        if Config.Debug then
-            print("⚠️ ไม่พบ Folder BookShelves, ใช้ GetDescendants | ชั้นทั้งหมดในแมพ:", #objectsToScan)
-        end
+    if gui and gui.status then
+        gui.status.Text = "Status: Collecting..."
+        gui.status.TextColor3 = Color3.fromRGB(0, 255, 100)
     end
 
-    for _, obj in pairs(objectsToScan) do
-        local d = (obj.Position - hrp.Position).Magnitude
-        if d <= Config.ShelfRadius then
-            -- ✅ ไม่ใช้ GetPartBoundsInRadius อีกต่อไป (เพราะมักมีบั๊ก)
-            -- ถ้าต้องการเช็คว่างจริงๆ ให้ดูจาก Config.SkipOccupiedCheck
-            local isEmpty = true
-            
-            if not Config.SkipOccupiedCheck then
-                -- วิธีเช็คแบบง่าย: ดูว่ามีหนังสืออยู่ใน children ของชั้นหรือไม่
-                -- (บางแมพหนังสือจะเป็น children ของชั้น)
-                for _, child in pairs(obj:GetChildren()) do
-                    if isBook(child) then
-                        isEmpty = false
-                        break
-                    end
-                end
-            end
-            
-            if isEmpty then
-                table.insert(list, {shelf = obj, dist = d})
-            end
-        end
-    end
-    
-    table.sort(list, function(a, b) return a.dist < b.dist end)
-    return list
-end
+    collectionLoop = RunService.Heartbeat:Connect(function()
+        if not CONFIG.AutoCollect then return end
 
-local function getPlaceOffset(shelf)
-    if Config.PlaceOffset then
-        return Config.PlaceOffset
-    end
-    -- คำนวณอัตโนมัติจากขนาดชั้น (จาก JSON ชั้นสูง ~11.25)
-    if shelf and shelf:IsA("BasePart") then
-        return (shelf.Size.Y / 2) + 1.5
-    end
-    return 6 -- default ถ้าหาขนาดไม่เจอ
-end
+        local char = player.Character
+        if not char then return end
+        if not char:FindFirstChild("HumanoidRootPart") then return end
 
-local function tweenBook(book, shelf)
-    if not book or not shelf or not book.Parent then return false end
-    if not shelf.Parent then return false end
+        local books = findBooks()
+        if #books == 0 then return end
 
-    local offset = getPlaceOffset(shelf)
-    local targetCF = shelf.CFrame * CFrame.new(0, offset, 0) * CFrame.Angles(0, math.rad(90), 0)
-    local dist = (book.Position - targetCF.Position).Magnitude
-    local duration = math.max(0.3, dist / (20 * Config.Speed))
-
-    book.Anchored = true
-    book.CanCollide = false
-
-    local tween = TweenService:Create(book, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
-        CFrame = targetCF
-    })
-
-    tween:Play()
-    tween.Completed:Wait()
-
-    book.Anchored = true
-    return true
-end
-
--- ═══════════════════════════════════════════════
--- MAIN LOOP (FIXED)
--- ═══════════════════════════════════════════════
-
-local function mainLoop()
-    while true do
-        task.wait(0.5)
-        if not Config.Enabled then isRunning = false; continue end
-        if isRunning then continue end
-
-        isRunning = true
-        local hrp = getHRP()
-        if not hrp then 
-            isRunning = false
-            if Config.Debug then print("❌ ไม่พบ HRP") end
-            continue 
-        end
-
-        local books = scanBooks()
-        local shelves = scanShelves()
-
-        UI.bookCount.Text = "📖 หนังสือ: " .. #books
-        UI.shelfCount.Text = "🗄️ ชั้นวางว่าง: " .. #shelves
-
-        if Config.Debug then
-            print(string.format("📊 สแกน: หนังสือ %d เล่ม | ชั้นวาง %d ชิ้น (ระยะ %d)", 
-                #books, #shelves, Config.ShelfRadius))
-        end
-
-        if #books > 0 and #shelves > 0 then
-            UI.statusLabel.Text = "📦 กำลังจัดเก็บ " .. #books .. " เล่ม..."
-            UI.statusLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
-
-            for i, data in ipairs(books) do
-                if not Config.Enabled then break end
-                if not data.book.Parent then continue end
-
-                if #shelves == 0 then shelves = scanShelves() end
-                if #shelves == 0 then 
-                    UI.statusLabel.Text = "⚠️ ชั้นวางเต็มหมดแล้ว!"
-                    break 
-                end
-
-                local shelfData = shelves[1]
-                if not shelfData or not shelfData.shelf.Parent then
-                    table.remove(shelves, 1)
-                    continue
-                end
-
-                -- Double check ก่อนวาง (แบบง่าย)
-                local stillEmpty = true
-                if not Config.SkipOccupiedCheck then
-                    for _, child in pairs(shelfData.shelf:GetChildren()) do
-                        if isBook(child) then 
-                            stillEmpty = false
-                            break 
-                        end
-                    end
-                end
-
-                if stillEmpty then
-                    local ok = tweenBook(data.book, shelfData.shelf)
-                    if ok then
-                        UI.statusLabel.Text = "✅ จัดเก็บเล่มที่ " .. i .. " สำเร็จ"
-                        if Config.Debug then
-                            print("✅ วางหนังสือบน", shelfData.shelf.Name, "ที่", tostring(shelfData.shelf.Position))
-                        end
-                        task.wait(0.3)
-                        table.remove(shelves, 1)
-                    end
-                else
-                    if Config.Debug then print("⚠️ ชั้น", shelfData.shelf.Name, "มีหนังสือแล้ว ข้าม") end
-                    table.remove(shelves, 1)
-                end
-                task.wait(0.2)
+        -- Collect nearest book
+        local nearest = books[1]
+        if nearest.distance < 5 then
+            -- Close enough, interact if possible
+            local proximityPrompt = nearest.part:FindFirstChildWhichIsA("ProximityPrompt")
+            if proximityPrompt then
+                fireproximityprompt(proximityPrompt)
             end
 
-            UI.statusLabel.Text = "🟢 รอบนี้เสร็จสิ้น"
-            UI.statusLabel.TextColor3 = Color3.fromRGB(100, 255, 150)
+            -- Also try click detector
+            local clickDetector = nearest.part:FindFirstChildWhichIsA("ClickDetector")
+            if clickDetector then
+                fireclickdetector(clickDetector)
+            end
+
+            -- Try touching
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            hrp.CFrame = CFrame.new(nearest.part.Position + Vector3.new(0, 3, 0))
         else
-            if #books == 0 then
-                UI.statusLabel.Text = "🔍 ไม่พบหนังสือในระยะ " .. Config.ScanRadius
-            else
-                UI.statusLabel.Text = "⚠️ ไม่พบชั้นวางว่าง! (เจอชั้นทั้งหมด: 0)"
-            end
-            UI.statusLabel.TextColor3 = Color3.fromRGB(255, 180, 100)
+            -- Walk to it
+            collectBook(nearest)
         end
+    end)
+end
 
-        isRunning = false
-        task.wait(1)
+local function stopCollection()
+    if collectionLoop then
+        collectionLoop:Disconnect()
+        collectionLoop = nil
+    end
+
+    if gui and gui.status then
+        gui.status.Text = "Status: Stopped"
+        gui.status.TextColor3 = Color3.fromRGB(255, 150, 50)
     end
 end
 
--- ═══════════════════════════════════════════════
+-- ==========================
+-- HOTKEY SYSTEM
+-- ==========================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+
+    -- F key: Toggle auto collect
+    if input.KeyCode == Enum.KeyCode.F then
+        CONFIG.AutoCollect = not CONFIG.AutoCollect
+        if CONFIG.AutoCollect then
+            startCollection()
+        else
+            stopCollection()
+        end
+    end
+
+    -- G key: Toggle ESP
+    if input.KeyCode == Enum.KeyCode.G then
+        CONFIG.ShowESP = not CONFIG.ShowESP
+        if CONFIG.ShowESP then
+            startESP()
+        else
+            stopESP()
+        end
+    end
+
+    -- H key: Toggle UI
+    if input.KeyCode == Enum.KeyCode.H then
+        if gui then
+            local mf = gui:FindFirstChild("MainFrame")
+            if mf then
+                mf.Visible = not mf.Visible
+            end
+        end
+    end
+
+    -- E key: Manual collect nearest
+    if input.KeyCode == Enum.KeyCode.E then
+        local books = findBooks()
+        if #books > 0 then
+            collectBook(books[1])
+        end
+    end
+end)
+
+-- ==========================
+-- ESP UPDATE LOOP
+-- ==========================
+RunService.RenderStepped:Connect(function()
+    if CONFIG.ShowESP then
+        -- Refresh ESP every 0.5s
+        local t = tick() % 0.5
+        if t < 0.02 then
+            startESP()
+        end
+        updateAllBillboards()
+    end
+end)
+
+-- ==========================
+-- CLEANUP ON RESPAWN
+-- ==========================
+Players.LocalPlayer.CharacterAdded:Connect(function()
+    stopCollection()
+    stopESP()
+    if CONFIG.AutoCollect then
+        startCollection()
+    end
+    if CONFIG.ShowESP then
+        startESP()
+    end
+end)
+
+-- ==========================
 -- INIT
--- ═══════════════════════════════════════════════
-task.spawn(mainLoop)
-updateToggle()
+-- ==========================
+local uiElements = createUI()
 
--- สแกนครั้งแรกเพื่อแสดงสถานะ
-local initShelves = scanShelves()
-UI.statusLabel.Text = "✨ พร้อมใช้งาน! เจอชั้นวาง " .. #initShelves .. " ชิ้น (รัศมี: " .. Config.ShelfRadius .. ")"
-UI.statusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
+if CONFIG.AutoCollect then
+    startCollection()
+end
 
-print("✅ Delta Auto Shelf JSON-FIXED V2 Loaded")
-print("📚 ชั้นวางที่เจอ:", #initShelves, "ชิ้น")
-print("💡 ถ้ายังไม่เจอชั้น ให้เพิ่ม ShelfRadius หรือเดินเข้าใกล้ชั้นวาง")
+if CONFIG.ShowESP then
+    startESP()
+end
+
+if uiElements.status then
+    uiElements.status.Text = "Status: Active | F=Collect G=ESP H=UI"
+    uiElements.status.TextColor3 = Color3.fromRGB(0, 255, 200)
+end
+
+-- Print commands
+print("📚 Book Collector loaded!")
+print("  F - Toggle Auto Collect")
+print("  G - Toggle ESP")
+print("  H - Toggle UI")
+print("  E - Manual Collect Nearest")
