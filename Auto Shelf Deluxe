@@ -1,42 +1,24 @@
--- Clean The Library Full Auto Collector
--- Author: BluezyGPT | For BZMEMBER's Map
--- สแกนหนังสือ + ชั้น → จับคู่เลข → เก็บเข้าชั้นอัตโนมัติ
+-- Clean The Library Minimum Working Version
+-- No fancy UI, just works on Delta
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
-local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
+local running = false
 
--- ==========================
 -- CONFIG
--- ==========================
-local CONFIG = {
-    MoveSpeed = 16,
-    InteractRange = 5,
-    InteractDelay = 0.4,
-    ESPColor = Color3.fromRGB(0, 255, 200),
-    CollectedColor = Color3.fromRGB(100, 100, 100),
-}
+local RANGE = 50
+local SPEED = 16
 
--- ==========================
 -- STATE
--- ==========================
-local State = {
-    Running = false,
-    Phase = "idle", -- idle, toBook, collect, toShelf, place
-    CurrentBook = nil,
-    CurrentShelf = nil,
-    CollectedBooks = {},
-    TotalBooks = 0,
-    PlacedBooks = 0,
-    LastBookPos = nil,
-}
+local books = {}
+local shelves = {}
+local currentTarget = nil
+local phase = "idle" -- toBook, collect, toShelf, place
+local interactTimer = 0
 
--- ==========================
 -- HELPERS
--- ==========================
 local function getHRP()
     local char = player.Character
     if not char then return nil end
@@ -49,695 +31,332 @@ local function getHumanoid()
     return char:FindFirstChildOfClass("Humanoid")
 end
 
-local function getDistance(pos)
+local function dist(pos)
     local hrp = getHRP()
-    if not hrp then return math.huge end
+    if not hrp then return 999 end
     return (hrp.Position - pos).Magnitude
 end
 
--- ==========================
--- BOOK & SHELF SCANNER
--- ==========================
-local Books = {}
-local Shelves = {}
-
-local function scanWorkspace()
-    Books = {}
-    Shelves = {}
-
+-- SCAN
+local function scan()
+    books = {}
+    shelves = {}
+    
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("MeshPart") then
             local name = obj.Name
-
-            -- Book: มี _ตัวเลข ต่อท้าย และไม่ใช่ BookShelf
-            if not name:find("BookShelf") and not name:find("Shelf") then
-                local bookName, shelfNum = name:match("^(.+)_([%d]+)$")
-                if bookName and shelfNum then
-                    table.insert(Books, {
+            
+            if name:find("BookShelf") then
+                local _, num = name:match("_(%d+)$")
+                table.insert(shelves, {
+                    Part = obj,
+                    Num = tonumber(num) or 0,
+                    Name = name
+                })
+            elseif name:match("_%d+$") then
+                local bname, num = name:match("^(.+)_([%d]+)$")
+                if bname then
+                    table.insert(books, {
                         Part = obj,
-                        Name = bookName,
-                        ShelfNum = tonumber(shelfNum),
+                        Name = bname,
+                        ShelfNum = tonumber(num) or 0,
                         FullName = name,
-                        Collected = false,
-                        Placed = false,
+                        Done = false
                     })
                 end
             end
-
-            -- Shelf: ชื่อมี BookShelf
-            if name:find("BookShelf") then
-                local _, shelfNum = name:match("^(.+)_([%d]+)$")
-                table.insert(Shelves, {
-                    Part = obj,
-                    Num = tonumber(shelfNum) or 0,
-                    Name = name,
-                })
-            end
         end
     end
+    
+    print(("📚 Found %d books, %d shelves"):format(#books, #shelves))
+end
 
-    -- เรียงหนังสือตามระยะ
+-- FIND SHELF FOR BOOK
+local function findShelf(book)
+    for _, s in ipairs(shelves) do
+        if s.Num == book.ShelfNum then
+            return s
+        end
+    end
+    return shelves[1]
+end
+
+-- MOVE
+local function moveToward(pos, stopAt)
+    stopAt = stopAt or 4
     local hrp = getHRP()
-    if hrp then
-        local rp = hrp.Position
-        table.sort(Books, function(a, b)
-            local da = (a.Part.Position - rp).Magnitude
-            local db = (b.Part.Position - rp).Magnitude
-            return da < db
+    local hum = getHumanoid()
+    if not hrp or not hum then return true end
+    
+    local target = Vector3.new(pos.X, hrp.Position.Y, pos.Z)
+    local d = (target - hrp.Position).Magnitude
+    
+    if d <= stopAt then
+        hum:Move(Vector3.new(), true)
+        return true
+    end
+    
+    local dir = (target - hrp.Position).Unit
+    hum:Move(dir * SPEED, true)
+    return false
+end
+
+-- INTERACT
+local function interact(obj)
+    if not obj or not obj.Parent then return false end
+    
+    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt")
+    if prompt then
+        pcall(function()
+            if fireproximityprompt then fireproximityprompt(prompt) end
         end)
+        return true
     end
-
-    State.TotalBooks = #Books
-
-    print(("📚 Scanned: %d books, %d shelves"):format(#Books, #Shelves))
-    for i, b in ipairs(Books) do
-        print(("  [%d] %s → Shelf %d"):format(i, b.Name, b.ShelfNum))
+    
+    local cd = obj:FindFirstChildWhichIsA("ClickDetector")
+    if cd then
+        pcall(function()
+            if fireclickdetector then fireclickdetector(cd) end
+        end)
+        return true
     end
+    
+    return false
 end
 
-local function findShelfForBook(book)
-    for _, shelf in ipairs(Shelves) do
-        if shelf.Num == book.ShelfNum then
-            return shelf
-        end
-    end
-    -- ถ้าไม่เจอ shelf ตรงเลข ให้ใช้ shelf ไหนก็ได้ที่ใกล้สุด
-    if #Shelves > 0 then
-        local hrp = getHRP()
-        if hrp then
-            local closest = Shelves[1]
-            local closestDist = math.huge
-            for _, s in ipairs(Shelves) do
-                local d = (s.Part.Position - hrp.Position).Magnitude
-                if d < closestDist then
-                    closestDist = d
-                    closest = s
-                end
-            end
-            return closest
-        end
-    end
-    return nil
-end
-
-local function getNextUncollectedBook()
-    for _, b in ipairs(Books) do
-        if not b.Collected and b.Part and b.Part.Parent then
+-- GET NEXT BOOK
+local function getNextBook()
+    for _, b in ipairs(books) do
+        if not b.Done and b.Part and b.Part.Parent then
             return b
         end
     end
     return nil
 end
 
--- ==========================
--- MOVEMENT
--- ==========================
-local function moveTo(pos, stopDist)
-    stopDist = stopDist or 3
-    local hrp = getHRP()
-    local humanoid = getHumanoid()
-    if not hrp or not humanoid then return false end
-
-    local target = Vector3.new(pos.X, hrp.Position.Y, pos.Z)
-    local dist = (target - hrp.Position).Magnitude
-
-    if dist <= stopDist then
-        humanoid:Move(Vector3.new(), true)
-        return true
-    end
-
-    local dir = (target - hrp.Position).Unit
-    humanoid:Move(dir * CONFIG.MoveSpeed, true)
-    return false
-end
-
--- ==========================
--- INTERACTION
--- ==========================
-local function interact(obj)
-    if not obj or not obj.Parent then return false end
-
-    -- วิธีที่ 1: ProximityPrompt
-    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt")
-    if prompt then
-        local ok = pcall(function()
-            if fireproximityprompt then
-                fireproximityprompt(prompt)
-            else
-                prompt:RequestPrompt()
-            end
-        end)
-        if ok then return true end
-    end
-
-    -- วิธีที่ 2: ClickDetector
-    local cd = obj:FindFirstChildWhichIsA("ClickDetector")
-    if cd then
-        local ok = pcall(function()
-            if fireclickdetector then
-                fireclickdetector(cd)
-            end
-        end)
-        if ok then return true end
-    end
-
-    -- วิธีที่ 3: Touch (เดินไปชน)
-    -- จะทำใน movement loop อยู่แล้ว
-
-    return false
-end
-
--- ==========================
--- ESP
--- ==========================
-local ESP = {}
-
-local function clearESP()
-    for _, e in pairs(ESP) do
-        if e.Billboard then e.Billboard:Destroy() end
-        if e.Highlight then e.Highlight:Destroy() end
-    end
-    ESP = {}
-end
-
-local function refreshESP()
-    clearESP()
-
-    for _, b in ipairs(Books) do
-        if b.Part and b.Part.Parent then
-            local color = CONFIG.ESPColor
-            if b.Placed then
-                color = Color3.fromRGB(50, 50, 50)
-            elseif b.Collected then
-                color = Color3.fromRGB(200, 150, 0)
-            end
-
-            local bb = Instance.new("BillboardGui")
-            bb.Size = UDim2.new(0, 160, 0, 40)
-            bb.StudsOffset = Vector3.new(0, 2.5, 0)
-            bb.AlwaysOnTop = true
-            bb.Parent = b.Part
-
-            local bg = Instance.new("Frame")
-            bg.Size = UDim2.new(1, 0, 1, 0)
-            bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-            bg.BackgroundTransparency = 0.7
-            bg.BorderSizePixel = 0
-            bg.Parent = bb
-
-            local c = Instance.new("UICorner")
-            c.CornerScale = UDim2.new(0, 6)
-            c.Parent = bg
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(1, 0, 1, 0)
-            lbl.BackgroundTransparency = 1
-            lbl.Text = ("📚 %s\n📍 Shelf %d"):format(b.Name, b.ShelfNum)
-            lbl.TextColor3 = color
-            lbl.TextSize = 12
-            lbl.Font = Enum.Font.GothamBold
-            lbl.TextWrapped = true
-            lbl.Parent = bb
-
-            local hl = Instance.new("Highlight")
-            hl.FillColor = color
-            hl.OutlineColor = color
-            hl.FillTransparency = 0.7
-            hl.OutlineTransparency = 0
-            hl.Parent = b.Part
-
-            ESP[b.Part] = { Billboard = bb, Highlight = hl }
-        end
-    end
-
-    -- ESP สำหรับชั้น
-    for _, s in ipairs(Shelves) do
-        if s.Part and s.Part.Parent then
-            local bb = Instance.new("BillboardGui")
-            bb.Size = UDim2.new(0, 100, 0, 28)
-            bb.StudsOffset = Vector3.new(0, 3, 0)
-            bb.AlwaysOnTop = true
-            bb.Parent = s.Part
-
-            local bg = Instance.new("Frame")
-            bg.Size = UDim2.new(1, 0, 1, 0)
-            bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-            bg.BackgroundTransparency = 0.7
-            bg.BorderSizePixel = 0
-            bg.Parent = bb
-
-            local c = Instance.new("UICorner")
-            c.CornerScale = UDim2.new(0, 6)
-            c.Parent = bg
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(1, 0, 1, 0)
-            lbl.BackgroundTransparency = 1
-            lbl.Text = ("📖 Shelf %d"):format(s.Num)
-            lbl.TextColor3 = Color3.fromRGB(150, 100, 255)
-            lbl.TextSize = 12
-            lbl.Font = Enum.Font.GothamBold
-            lbl.Parent = bb
-
-            local hl = Instance.new("Highlight")
-            hl.FillColor = Color3.fromRGB(150, 100, 255)
-            hl.OutlineColor = Color3.fromRGB(150, 100, 255)
-            hl.FillTransparency = 0.8
-            hl.OutlineTransparency = 0
-            hl.Parent = s.Part
-
-            ESP[s.Part] = { Billboard = bb, Highlight = hl }
-        end
-    end
-end
-
--- ==========================
 -- MAIN LOOP
--- ==========================
-local interactTimer = 0
-local stuckTimer = 0
-local lastDist = math.huge
-
 RunService.RenderStepped:Connect(function(dt)
-    if not State.Running then return end
-
+    if not running then return end
+    
     local hrp = getHRP()
     if not hrp then return end
-
-    -- Phase: ไปหาหนังสือ
-    if State.Phase == "toBook" then
-        if not State.CurrentBook or not State.CurrentBook.Part or not State.CurrentBook.Part.Parent then
-            -- หนังสือหายไปแล้ว ไปหาเล่มถัดไป
-            State.CurrentBook = getNextUncollectedBook()
-            if not State.CurrentBook then
-                print("✅ All books collected!")
-                State.Running = false
-                State.Phase = "idle"
-                return
-            end
-        end
-
-        local bookPos = State.CurrentBook.Part.Position
-        local arrived = moveTo(bookPos, CONFIG.InteractRange)
-
-        -- ตรวจสอบว่าติดหรือไม่
-        local dist = getDistance(bookPos)
-        if dist < lastDist then
-            stuckTimer = 0
-        else
-            stuckTimer = stuckTimer + dt
-        end
-        lastDist = dist
-
-        if stuckTimer > 2 then
-            -- ติด ให้กระโดด
-            local humanoid = getHumanoid()
-            if humanoid then
-                humanoid.Jump = true
-                stuckTimer = 0
-            end
-        end
-
-        if arrived or dist < CONFIG.InteractRange then
-            State.Phase = "collect"
-            interactTimer = 0
-            lastDist = math.huge
-            stuckTimer = 0
-        end
-
-    -- Phase: เก็บหนังสือ
-    elseif State.Phase == "collect" then
-        if not State.CurrentBook or not State.CurrentBook.Part or not State.CurrentBook.Part.Parent then
-            State.Phase = "toBook"
+    
+    -- TO BOOK
+    if phase == "toBook" then
+        currentTarget = getNextBook()
+        if not currentTarget then
+            print("✅ All books done!")
+            running = false
+            phase = "idle"
             return
         end
-
-        interactTimer = interactTimer + dt
-        if interactTimer >= CONFIG.InteractDelay then
+        
+        local arrived = moveToward(currentTarget.Part.Position, 5)
+        if arrived then
+            phase = "collect"
             interactTimer = 0
-            local success = interact(State.CurrentBook.Part)
-
-            -- สมมติว่าเก็บสำเร็จ (หรือรอให้ part หาย)
-            State.CurrentBook.Collected = true
-            State.LastBookPos = State.CurrentBook.Part.Position
-            State.Phase = "toShelf"
-            State.CurrentShelf = findShelfForBook(State.CurrentBook)
-            print(("✅ Collected: %s → Going to Shelf %d"):format(State.CurrentBook.Name, State.CurrentBook.ShelfNum))
-
-            -- ซ่อน ESP หนังสือที่เก็บแล้ว
-            if ESP[State.CurrentBook.Part] then
-                if ESP[State.CurrentBook.Part].Highlight then
-                    ESP[State.CurrentBook.Part].Highlight.FillColor = CONFIG.CollectedColor
-                    ESP[State.CurrentBook.Part].Highlight.OutlineColor = CONFIG.CollectedColor
-                end
-            end
         end
-
-    -- Phase: ไปหาชั้น
-    elseif State.Phase == "toShelf" then
-        if not State.CurrentShelf or not State.CurrentShelf.Part or not State.CurrentShelf.Part.Parent then
-            print("❌ Shelf not found, finding next book...")
-            State.Phase = "toBook"
-            State.CurrentBook = getNextUncollectedBook()
+        
+    -- COLLECT
+    elseif phase == "collect" then
+        if not currentTarget or not currentTarget.Part or not currentTarget.Part.Parent then
+            phase = "toBook"
             return
         end
-
-        local shelfPos = State.CurrentShelf.Part.Position
-        local arrived = moveTo(shelfPos, CONFIG.InteractRange)
-
-        local dist = getDistance(shelfPos)
-        if dist < lastDist then
-            stuckTimer = 0
-        else
-            stuckTimer = stuckTimer + dt
-        end
-        lastDist = dist
-
-        if stuckTimer > 2 then
-            local humanoid = getHumanoid()
-            if humanoid then
-                humanoid.Jump = true
-                stuckTimer = 0
-            end
-        end
-
-        if arrived or dist < CONFIG.InteractRange then
-            State.Phase = "place"
-            interactTimer = 0
-            lastDist = math.huge
-            stuckTimer = 0
-        end
-
-    -- Phase: วางหนังสือบนชั้น
-    elseif State.Phase == "place" then
+        
         interactTimer = interactTimer + dt
-        if interactTimer >= CONFIG.InteractDelay then
+        if interactTimer >= 0.5 then
+            interact(currentTarget.Part)
+            currentTarget.Done = true
+            phase = "toShelf"
             interactTimer = 0
-
-            if State.CurrentShelf and State.CurrentShelf.Part and State.CurrentShelf.Part.Parent then
-                interact(State.CurrentShelf.Part)
+            print(("✅ Got: %s"):format(currentTarget.Name))
+        end
+        
+    -- TO SHELF
+    elseif phase == "toShelf" then
+        local shelf = findShelf(currentTarget)
+        if not shelf or not shelf.Part then
+            phase = "toBook"
+            return
+        end
+        
+        local arrived = moveToward(shelf.Part.Position, 5)
+        if arrived then
+            phase = "place"
+            interactTimer = 0
+        end
+        
+    -- PLACE
+    elseif phase == "place" then
+        local shelf = findShelf(currentTarget)
+        if shelf and shelf.Part and shelf.Part.Parent then
+            interactTimer = interactTimer + dt
+            if interactTimer >= 0.5 then
+                interact(shelf.Part)
+                print(("✅ Placed on shelf %d"):format(currentTarget.ShelfNum))
+                phase = "toBook"
+                interactTimer = 0
             end
-
-            if State.CurrentBook then
-                State.CurrentBook.Placed = true
-            end
-            State.PlacedBooks = State.PlacedBooks + 1
-
-            print(("✅ Placed: %s on Shelf %d (%d/%d)"):format(
-                State.CurrentBook.Name,
-                State.CurrentBook.ShelfNum,
-                State.PlacedBooks,
-                State.TotalBooks
-            ))
-
-            -- หาหนังสือเล่มถัดไป
-            State.CurrentBook = getNextUncollectedBook()
-            if State.CurrentBook then
-                State.Phase = "toBook"
-            else
-                print("✅ All books placed! Done!")
-                State.Running = false
-                State.Phase = "idle"
-            end
-
-            lastDist = math.huge
-            stuckTimer = 0
+        else
+            phase = "toBook"
         end
     end
 end)
 
--- ==========================
 -- CONTROLS
--- ==========================
 local function start()
-    if State.Running then return end
-    scanWorkspace()
-    if #Books == 0 then
+    if running then return end
+    scan()
+    if #books == 0 then
         print("❌ No books found!")
         return
     end
-    State.Running = true
-    State.Phase = "toBook"
-    State.PlacedBooks = 0
-    State.CurrentBook = getNextUncollectedBook()
-    refreshESP()
-    print("🚀 Auto collector started!")
+    running = true
+    phase = "toBook"
+    print("🚀 Started!")
 end
 
 local function stop()
-    State.Running = false
-    State.Phase = "idle"
-    local humanoid = getHumanoid()
-    if humanoid then
-        humanoid:Move(Vector3.new(), true)
-    end
-    print("⏹️ Stopped")
+    running = false
+    phase = "idle"
+    local hum = getHumanoid()
+    if hum then hum:Move(Vector3.new(), true) end
+    print("⏹ Stopped")
 end
 
-local function step()
-    scanWorkspace()
-    local b = getNextUncollectedBook()
-    if b then
-        State.CurrentBook = b
-        State.Phase = "toBook"
-        State.Running = true
-        print(("📖 Stepping to: %s"):format(b.Name))
-    else
-        print("✅ No more books to collect")
-    end
-end
-
--- ==========================
--- UI
--- ==========================
+-- SIMPLE UI (Minimal - Delta Compatible)
 local function createUI()
     local gui = Instance.new("ScreenGui")
-    gui.Name = "LibraryProUI"
+    gui.Name = "LibUI"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
-    gui.Parent = player:WaitForChild("PlayerGui")
-
-    -- Panel
-    local panel = Instance.new("Frame")
-    panel.Size = UDim2.new(0, 270, 0, 280)
-    panel.Position = UDim2.new(0.5, -135, 0, 60)
-    panel.BackgroundColor3 = Color3.fromRGB(15, 15, 32)
-    panel.BorderSizePixel = 0
-    panel.Parent = gui
-
-    local pCorner = Instance.new("UICorner")
-    pCorner.CornerScale = UDim2.new(0, 14)
-    pCorner.Parent = panel
-
-    local pStroke = Instance.new("UIStroke")
-    pStroke.Color = Color3.fromRGB(100, 60, 200)
-    pStroke.Thickness = 2
-    pStroke.Transparency = 0.5
-    pStroke.Parent = panel
-
-    -- Title
-    local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 40)
-    titleBar.BackgroundColor3 = Color3.fromRGB(35, 25, 75)
-    titleBar.BorderSizePixel = 0
-    titleBar.Parent = panel
-
-    local tbCorner = Instance.new("UICorner")
-    tbCorner.CornerScale = UDim2.new(0, 14)
-    tbCorner.Parent = titleBar
-
-    local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size = UDim2.new(1, -10, 1, 0)
-    titleLbl.Position = UDim2.new(0, 10, 0, 0)
-    titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "📚 Library Auto Collector"
-    titleLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleLbl.TextSize = 15
-    titleLbl.Font = Enum.Font.GothamBold
-    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-    titleLbl.Parent = titleBar
-
-    -- Drag
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 200, 0, 120)
+    frame.Position = UDim2.new(0.5, -100, 0, 50)
+    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 40)
+    frame.BorderSizePixel = 0
+    
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.BackgroundColor3 = Color3.fromRGB(40, 30, 80)
+    title.BorderSizePixel = 0
+    title.Text = "📚 Library Auto"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 14
+    title.Font = Enum.Font.SourceSansBold
+    
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, 0, 0, 20)
+    status.Position = UDim2.new(0, 0, 0, 35)
+    status.BackgroundTransparency = 1
+    status.Text = "Status: Ready"
+    status.TextColor3 = Color3.fromRGB(0, 255, 200)
+    status.TextSize = 11
+    status.Font = Enum.Font.SourceSans
+    
+    local startBtn = Instance.new("TextButton")
+    startBtn.Size = UDim2.new(0.45, 0, 0, 30)
+    startBtn.Position = UDim2.new(0.025, 0, 0, 60)
+    startBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 80)
+    startBtn.BorderSizePixel = 0
+    startBtn.Text = "▶ START"
+    startBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    startBtn.TextSize = 12
+    startBtn.Font = Enum.Font.SourceSansBold
+    
+    local stopBtn = Instance.new("TextButton")
+    stopBtn.Size = UDim2.new(0.45, 0, 0, 30)
+    stopBtn.Position = UDim2.new(0.525, 0, 0, 60)
+    stopBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    stopBtn.BorderSizePixel = 0
+    stopBtn.Text = "⏹ STOP"
+    stopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    stopBtn.TextSize = 12
+    stopBtn.Font = Enum.Font.SourceSansBold
+    
+    local scanBtn = Instance.new("TextButton")
+    scanBtn.Size = UDim2.new(1, 0, 0, 25)
+    scanBtn.Position = UDim2.new(0, 0, 0, 95)
+    scanBtn.BackgroundColor3 = Color3.fromRGB(100, 80, 200)
+    scanBtn.BorderSizePixel = 0
+    scanBtn.Text = "🔄 SCAN"
+    scanBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    scanBtn.TextSize = 11
+    scanBtn.Font = Enum.Font.SourceSansBold
+    
+    -- PARENTS
+    frame.Parent = gui
+    title.Parent = frame
+    status.Parent = frame
+    startBtn.Parent = frame
+    stopBtn.Parent = frame
+    scanBtn.Parent = frame
+    
+    -- CLICKS
+    startBtn.MouseButton1Click:Connect(function()
+        start()
+    end)
+    
+    stopBtn.MouseButton1Click:Connect(function()
+        stop()
+    end)
+    
+    scanBtn.MouseButton1Click:Connect(function()
+        scan()
+    end)
+    
+    -- DRAG
     local dragging = false
     local dragStart, startPos
-
-    titleBar.InputBegan:Connect(function(input)
+    
+    title.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             dragStart = input.Position
-            startPos = panel.Position
+            startPos = frame.Position
         end
     end)
-
-    titleBar.InputChanged:Connect(function(input)
+    
+    title.InputChanged:Connect(function(input)
         if dragging then
             local delta = input.Position - dragStart
-            panel.Position = UDim2.new(
+            frame.Position = UDim2.new(
                 startPos.X.Scale, startPos.X.Offset + delta.X,
                 startPos.Y.Scale, startPos.Y.Offset + delta.Y
             )
         end
     end)
-
-    titleBar.InputEnded:Connect(function(input)
+    
+    title.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
         end
     end)
-
-    -- Content
-    local content = Instance.new("Frame")
-    content.Size = UDim2.new(1, -16, 1, -56)
-    content.Position = UDim2.new(0, 8, 0, 48)
-    content.BackgroundTransparency = 1
-    content.Parent = panel
-
-    local list = Instance.new("UIListLayout")
-    list.Padding = UDim.new(0, 6)
-    list.Parent = content
-
-    -- Status
-    local statusFrame = Instance.new("Frame")
-    statusFrame.Size = UDim2.new(1, 0, 0, 28)
-    statusFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 28)
-    statusFrame.BorderSizePixel = 0
-    statusFrame.Parent = content
-
-    local sfCorner = Instance.new("UICorner")
-    sfCorner.CornerScale = UDim2.new(0, 6)
-    sfCorner.Parent = statusFrame
-
-    local statusLbl = Instance.new("TextLabel")
-    statusLbl.Size = UDim2.new(1, 0, 1, 0)
-    statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = "Status: Ready"
-    statusLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
-    statusLbl.TextSize = 11
-    statusLbl.Font = Enum.Font.Gotham
-    statusLbl.Parent = statusFrame
-
-    -- Progress
-    local progFrame = Instance.new("Frame")
-    progFrame.Size = UDim2.new(1, 0, 0, 20)
-    progFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 40)
-    progFrame.BorderSizePixel = 0
-    progFrame.Parent = content
-
-    local pfCorner = Instance.new("UICorner")
-    pfCorner.CornerScale = UDim2.new(0, 4)
-    pfCorner.Parent = progFrame
-
-    local progFill = Instance.new("Frame")
-    progFill.Size = UDim2.new(0, 0, 1, 0)
-    progFill.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
-    progFill.BorderSizePixel = 0
-    progFill.Parent = progFrame
-
-    local pfc = Instance.new("UICorner")
-    pfc.CornerScale = UDim2.new(0, 4)
-    pfc.Parent = progFill
-
-    local progLbl = Instance.new("TextLabel")
-    progLbl.Size = UDim2.new(1, 0, 1, 0)
-    progLbl.BackgroundTransparency = 1
-    progLbl.Text = "0 / 0"
-    progLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
-    progLbl.TextSize = 11
-    progLbl.Font = Enum.Font.GothamBold
-    progLbl.Parent = progFrame
-
-    -- Buttons
-    local function btn(text, color, callback)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, 0, 0, 40)
-        b.BackgroundColor3 = color
-        b.BorderSizePixel = 0
-        b.Text = text
-        b.TextColor3 = Color3.fromRGB(255, 255, 255)
-        b.TextSize = 13
-        b.Font = Enum.Font.GothamBold
-        b.Parent = content
-
-        local bc = Instance.new("UICorner")
-        bc.CornerScale = UDim2.new(0, 8)
-        bc.Parent = b
-
-        b.MouseButton1Click:Connect(callback)
-        return b
-    end
-
-    local startBtn = btn("▶ START AUTO", Color3.fromRGB(0, 150, 80), function()
-        start()
-    end)
-
-    local stepBtn = btn("📖 STEP (One Book)", Color3.fromRGB(0, 120, 200), function()
-        step()
-    end)
-
-    local stopBtn = btn("⏹ STOP", Color3.fromRGB(180, 50, 50), function()
-        stop()
-    end)
-
-    local espBtn = btn("👁 TOGGLE ESP", Color3.fromRGB(100, 80, 200), function()
-        refreshESP()
-    end)
-
-    local rescanBtn = btn("🔄 RESCAN", Color3.fromRGB(150, 120, 50), function()
-        scanWorkspace()
-        refreshESP()
-    end)
-
-    -- Update progress
+    
+    -- UPDATE STATUS
     RunService.RenderStepped:Connect(function()
-        if State.TotalBooks > 0 then
-            local pct = State.PlacedBooks / State.TotalBooks
-            progFill.Size = UDim2.new(pct, 0, 1, 0)
-            progLbl.Text = ("%d / %d"):format(State.PlacedBooks, State.TotalBooks)
-        end
-
-        if State.Running then
-            local phaseText = State.Phase
-            if State.CurrentBook then
-                statusLbl.Text = ("Phase: %s | %s"):format(phaseText, State.CurrentBook.Name)
-            else
-                statusLbl.Text = ("Phase: %s"):format(phaseText)
-            end
-            statusLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+        if running then
+            status.Text = ("Running: %s"):format(phase)
         else
-            statusLbl.Text = "Status: Ready"
-            statusLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
+            status.Text = "Status: Ready"
         end
     end)
+    
+    gui.Parent = player:WaitForChild("PlayerGui")
+    print("✅ UI loaded")
 end
 
--- ==========================
--- HOTKEYS
--- ==========================
-UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-
-    if input.KeyCode == Enum.KeyCode.P then
-        if State.Running then stop() else start() end
-    end
-
-    if input.KeyCode == Enum.KeyCode.K then
-        step()
-    end
-
-    if input.KeyCode == Enum.KeyCode.Semicolon then
-        refreshESP()
-    end
+-- INIT
+local ok, err = pcall(function()
+    createUI()
 end)
 
--- ==========================
--- INIT
--- ==========================
-createUI()
-scanWorkspace()
-refreshESP()
-
-print("📚 Clean The Library Auto Collector loaded!")
-print("  P = Start/Stop Auto")
-print("  K = Collect One Book (Step)")
-print("  ; = Refresh ESP")
-print("  Or use the UI panel")
+if not ok then
+    warn("UI failed: " .. tostring(err))
+    print("❌ UI creation failed. Check console.")
+else
+    print("📚 Library Auto loaded!")
+    print("  Use the panel to start")
+end
