@@ -1,43 +1,41 @@
--- Clean The Library Pro v3
--- Author: BluezyGPT | Delta Optimized
--- Full rewrite - fixed UI rendering + collection logic
+-- Clean The Library Full Auto Collector
+-- Author: BluezyGPT | For BZMEMBER's Map
+-- สแกนหนังสือ + ชั้น → จับคู่เลข → เก็บเข้าชั้นอัตโนมัติ
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
-local collecting = false
-local espEnabled = false
-local autoCollecting = false
 
 -- ==========================
 -- CONFIG
 -- ==========================
 local CONFIG = {
-    Range = 30,
     MoveSpeed = 16,
-    CollectDelay = 0.25,
+    InteractRange = 5,
+    InteractDelay = 0.4,
     ESPColor = Color3.fromRGB(0, 255, 200),
-    ESPThickness = 2,
+    CollectedColor = Color3.fromRGB(100, 100, 100),
 }
 
 -- ==========================
--- DEBUG LOGGER
+-- STATE
 -- ==========================
-local Debug = {}
-Debug.Log = function(msg)
-    print("[LibraryPro] " .. msg)
-end
-Debug.Warn = function(msg)
-    warn("[LibraryPro] " .. msg)
-end
-
-Debug.Log("Initializing...")
+local State = {
+    Running = false,
+    Phase = "idle", -- idle, toBook, collect, toShelf, place
+    CurrentBook = nil,
+    CurrentShelf = nil,
+    CollectedBooks = {},
+    TotalBooks = 0,
+    PlacedBooks = 0,
+    LastBookPos = nil,
+}
 
 -- ==========================
--- CHARACTER HELPERS
+-- HELPERS
 -- ==========================
 local function getHRP()
     local char = player.Character
@@ -51,87 +49,135 @@ local function getHumanoid()
     return char:FindFirstChildOfClass("Humanoid")
 end
 
--- ==========================
--- TARGET FINDER (Broad Search)
--- ==========================
-local function findTargets()
-    local targets = {}
+local function getDistance(pos)
     local hrp = getHRP()
-    if not hrp then return targets end
+    if not hrp then return math.huge end
+    return (hrp.Position - pos).Magnitude
+end
 
-    local rp = hrp.Position
+-- ==========================
+-- BOOK & SHELF SCANNER
+-- ==========================
+local Books = {}
+local Shelves = {}
 
-    -- Scan everything in workspace
+local function scanWorkspace()
+    Books = {}
+    Shelves = {}
+
     for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local part = obj:IsA("BasePart") and obj or (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart"))
-            if part then
-                local d = (part.Position - rp).Magnitude
-                if d <= CONFIG.Range then
-                    local name = obj.Name:lower()
-                    local score = 0
+        if obj:IsA("MeshPart") then
+            local name = obj.Name
 
-                    -- Keyword matching
-                    local keywords = {
-                        ["book"] = 10, ["note"] = 8, ["page"] = 8,
-                        ["paper"] = 7, ["scroll"] = 7, ["diary"] = 6,
-                        ["tome"] = 6, ["item"] = 5, ["collect"] = 9,
-                        ["trash"] = 4, ["clean"] = 4, ["obj"] = 3,
-                    }
-                    for key, val in pairs(keywords) do
-                        if name:find(key) then score = score + val end
-                    end
-
-                    -- Check interactables
-                    local interactType = "none"
-                    local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt")
-                    local clicker = obj:IsA("BasePart") and obj:FindFirstChildWhichIsA("ClickDetector") or nil
-
-                    if prompt then
-                        score = score + 15
-                        interactType = "prompt"
-                    elseif clicker then
-                        score = score + 12
-                        interactType = "click"
-                    end
-
-                    -- Check if small (pickup-able)
-                    if obj:IsA("BasePart") and obj.Size.Magnitude < 5 then
-                        score = score + 3
-                    end
-
-                    if score > 0 then
-                        table.insert(targets, {
-                            obj = obj,
-                            part = part,
-                            dist = d,
-                            score = score,
-                            interact = interactType,
-                            name = obj.Name
-                        })
-                    end
+            -- Book: มี _ตัวเลข ต่อท้าย และไม่ใช่ BookShelf
+            if not name:find("BookShelf") and not name:find("Shelf") then
+                local bookName, shelfNum = name:match("^(.+)_([%d]+)$")
+                if bookName and shelfNum then
+                    table.insert(Books, {
+                        Part = obj,
+                        Name = bookName,
+                        ShelfNum = tonumber(shelfNum),
+                        FullName = name,
+                        Collected = false,
+                        Placed = false,
+                    })
                 end
+            end
+
+            -- Shelf: ชื่อมี BookShelf
+            if name:find("BookShelf") then
+                local _, shelfNum = name:match("^(.+)_([%d]+)$")
+                table.insert(Shelves, {
+                    Part = obj,
+                    Num = tonumber(shelfNum) or 0,
+                    Name = name,
+                })
             end
         end
     end
 
-    -- Sort by score desc, then dist asc
-    table.sort(targets, function(a, b)
-        if a.score ~= b.score then return a.score > b.score end
-        return a.dist < b.dist
-    end)
+    -- เรียงหนังสือตามระยะ
+    local hrp = getHRP()
+    if hrp then
+        local rp = hrp.Position
+        table.sort(Books, function(a, b)
+            local da = (a.Part.Position - rp).Magnitude
+            local db = (b.Part.Position - rp).Magnitude
+            return da < db
+        end)
+    end
 
-    Debug.Log(("Found %d targets"):format(#targets))
-    return targets
+    State.TotalBooks = #Books
+
+    print(("📚 Scanned: %d books, %d shelves"):format(#Books, #Shelves))
+    for i, b in ipairs(Books) do
+        print(("  [%d] %s → Shelf %d"):format(i, b.Name, b.ShelfNum))
+    end
+end
+
+local function findShelfForBook(book)
+    for _, shelf in ipairs(Shelves) do
+        if shelf.Num == book.ShelfNum then
+            return shelf
+        end
+    end
+    -- ถ้าไม่เจอ shelf ตรงเลข ให้ใช้ shelf ไหนก็ได้ที่ใกล้สุด
+    if #Shelves > 0 then
+        local hrp = getHRP()
+        if hrp then
+            local closest = Shelves[1]
+            local closestDist = math.huge
+            for _, s in ipairs(Shelves) do
+                local d = (s.Part.Position - hrp.Position).Magnitude
+                if d < closestDist then
+                    closestDist = d
+                    closest = s
+                end
+            end
+            return closest
+        end
+    end
+    return nil
+end
+
+local function getNextUncollectedBook()
+    for _, b in ipairs(Books) do
+        if not b.Collected and b.Part and b.Part.Parent then
+            return b
+        end
+    end
+    return nil
 end
 
 -- ==========================
--- INTERACTION SYSTEM
+-- MOVEMENT
+-- ==========================
+local function moveTo(pos, stopDist)
+    stopDist = stopDist or 3
+    local hrp = getHRP()
+    local humanoid = getHumanoid()
+    if not hrp or not humanoid then return false end
+
+    local target = Vector3.new(pos.X, hrp.Position.Y, pos.Z)
+    local dist = (target - hrp.Position).Magnitude
+
+    if dist <= stopDist then
+        humanoid:Move(Vector3.new(), true)
+        return true
+    end
+
+    local dir = (target - hrp.Position).Unit
+    humanoid:Move(dir * CONFIG.MoveSpeed, true)
+    return false
+end
+
+-- ==========================
+-- INTERACTION
 -- ==========================
 local function interact(obj)
-    if not obj then return false end
+    if not obj or not obj.Parent then return false end
 
-    -- Try ProximityPrompt first
+    -- วิธีที่ 1: ProximityPrompt
     local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt")
     if prompt then
         local ok = pcall(function()
@@ -141,630 +187,544 @@ local function interact(obj)
                 prompt:RequestPrompt()
             end
         end)
-        if ok then
-            Debug.Log("Interacted via Prompt")
-            return true
-        end
+        if ok then return true end
     end
 
-    -- Try ClickDetector
-    if obj:IsA("BasePart") then
-        local cd = obj:FindFirstChildWhichIsA("ClickDetector")
-        if cd then
-            local ok = pcall(function()
-                if fireclickdetector then
-                    fireclickdetector(cd)
-                end
-            end)
-            if ok then
-                Debug.Log("Interacted via ClickDetector")
-                return true
+    -- วิธีที่ 2: ClickDetector
+    local cd = obj:FindFirstChildWhichIsA("ClickDetector")
+    if cd then
+        local ok = pcall(function()
+            if fireclickdetector then
+                fireclickdetector(cd)
             end
-        end
+        end)
+        if ok then return true end
     end
 
-    -- Try Touch (move player close)
-    local hrp = getHRP()
-    if hrp then
-        local part = obj:IsA("BasePart") and obj or obj.PrimaryPart
-        if part then
-            hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 2.5, 0))
-            Debug.Log("Moved to target")
-            return true
-        end
-    end
+    -- วิธีที่ 3: Touch (เดินไปชน)
+    -- จะทำใน movement loop อยู่แล้ว
 
     return false
 end
 
 -- ==========================
--- COLLECTION LOGIC
+-- ESP
 -- ==========================
-local function collect()
-    local hrp = getHRP()
-    local humanoid = getHumanoid()
-    if not hrp or not humanoid then
-        Debug.Warn("No character or humanoid")
-        return
-    end
-
-    local targets = findTargets()
-    if #targets == 0 then
-        Debug.Log("No targets in range")
-        return
-    end
-
-    local t = targets[1]
-    Debug.Log(("Target: %s at %dm"):format(t.name, math.floor(t.dist)))
-
-    if t.dist < 6 then
-        -- Close enough - interact
-        interact(t.obj)
-    else
-        -- Walk toward target
-        local tp = t.part.Position
-        tp = Vector3.new(tp.X, hrp.Position.Y, tp.Z)
-        local dir = (tp - hrp.Position).Unit
-        humanoid:Move(dir * CONFIG.MoveSpeed, true)
-    end
-end
-
--- ==========================
--- ESP SYSTEM
--- ==========================
-local espObjects = {}
+local ESP = {}
 
 local function clearESP()
-    for _, data in pairs(espObjects) do
-        if data.billboard then data.billboard:Destroy() end
-        if data.highlight then data.highlight:Destroy() end
+    for _, e in pairs(ESP) do
+        if e.Billboard then e.Billboard:Destroy() end
+        if e.Highlight then e.Highlight:Destroy() end
     end
-    espObjects = {}
+    ESP = {}
 end
 
 local function refreshESP()
     clearESP()
-    if not espEnabled then return end
 
-    local targets = findTargets()
-    for _, t in ipairs(targets) do
-        local part = t.part
-
-        -- Billboard
-        local bb = Instance.new("BillboardGui")
-        bb.Size = UDim2.new(0, 130, 0, 32)
-        bb.StudsOffset = Vector3.new(0, 2.5, 0)
-        bb.AlwaysOnTop = true
-        bb.Adornee = part
-        bb.Parent = part
-
-        local bg = Instance.new("Frame")
-        bg.Size = UDim2.new(1, 0, 1, 0)
-        bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-        bg.BackgroundTransparency = 0.7
-        bg.BorderSizePixel = 0
-        bg.Parent = bb
-
-        local c = Instance.new("UICorner")
-        c.CornerScale = UDim2.new(0, 6)
-        c.Parent = bg
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, 0, 1, 0)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = ("📚 %dm"):format(math.floor(t.dist))
-        lbl.TextColor3 = CONFIG.ESPColor
-        lbl.TextSize = 13
-        lbl.Font = Enum.Font.GothamBold
-        lbl.TextStrokeTransparency = 0
-        lbl.Parent = bb
-
-        -- Highlight
-        local hl = Instance.new("Highlight")
-        hl.FillColor = CONFIG.ESPColor
-        hl.OutlineColor = CONFIG.ESPColor
-        hl.FillTransparency = 0.7
-        hl.OutlineTransparency = 0
-        hl.Parent = part
-
-        espObjects[part] = { billboard = bb, highlight = hl }
-
-        -- Auto cleanup
-        local conn
-        conn = part.AncestryChanged:Connect(function()
-            if not part:IsDescendantOf(game) then
-                if espObjects[part] then
-                    if espObjects[part].billboard then espObjects[part].billboard:Destroy() end
-                    if espObjects[part].highlight then espObjects[part].highlight:Destroy() end
-                    espObjects[part] = nil
-                end
-                conn:Disconnect()
+    for _, b in ipairs(Books) do
+        if b.Part and b.Part.Parent then
+            local color = CONFIG.ESPColor
+            if b.Placed then
+                color = Color3.fromRGB(50, 50, 50)
+            elseif b.Collected then
+                color = Color3.fromRGB(200, 150, 0)
             end
-        end)
+
+            local bb = Instance.new("BillboardGui")
+            bb.Size = UDim2.new(0, 160, 0, 40)
+            bb.StudsOffset = Vector3.new(0, 2.5, 0)
+            bb.AlwaysOnTop = true
+            bb.Parent = b.Part
+
+            local bg = Instance.new("Frame")
+            bg.Size = UDim2.new(1, 0, 1, 0)
+            bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+            bg.BackgroundTransparency = 0.7
+            bg.BorderSizePixel = 0
+            bg.Parent = bb
+
+            local c = Instance.new("UICorner")
+            c.CornerScale = UDim2.new(0, 6)
+            c.Parent = bg
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.Text = ("📚 %s\n📍 Shelf %d"):format(b.Name, b.ShelfNum)
+            lbl.TextColor3 = color
+            lbl.TextSize = 12
+            lbl.Font = Enum.Font.GothamBold
+            lbl.TextWrapped = true
+            lbl.Parent = bb
+
+            local hl = Instance.new("Highlight")
+            hl.FillColor = color
+            hl.OutlineColor = color
+            hl.FillTransparency = 0.7
+            hl.OutlineTransparency = 0
+            hl.Parent = b.Part
+
+            ESP[b.Part] = { Billboard = bb, Highlight = hl }
+        end
     end
 
-    Debug.Log(("ESP refreshed: %d markers"):format(#targets))
+    -- ESP สำหรับชั้น
+    for _, s in ipairs(Shelves) do
+        if s.Part and s.Part.Parent then
+            local bb = Instance.new("BillboardGui")
+            bb.Size = UDim2.new(0, 100, 0, 28)
+            bb.StudsOffset = Vector3.new(0, 3, 0)
+            bb.AlwaysOnTop = true
+            bb.Parent = s.Part
+
+            local bg = Instance.new("Frame")
+            bg.Size = UDim2.new(1, 0, 1, 0)
+            bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+            bg.BackgroundTransparency = 0.7
+            bg.BorderSizePixel = 0
+            bg.Parent = bb
+
+            local c = Instance.new("UICorner")
+            c.CornerScale = UDim2.new(0, 6)
+            c.Parent = bg
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.Text = ("📖 Shelf %d"):format(s.Num)
+            lbl.TextColor3 = Color3.fromRGB(150, 100, 255)
+            lbl.TextSize = 12
+            lbl.Font = Enum.Font.GothamBold
+            lbl.Parent = bb
+
+            local hl = Instance.new("Highlight")
+            hl.FillColor = Color3.fromRGB(150, 100, 255)
+            hl.OutlineColor = Color3.fromRGB(150, 100, 255)
+            hl.FillTransparency = 0.8
+            hl.OutlineTransparency = 0
+            hl.Parent = s.Part
+
+            ESP[s.Part] = { Billboard = bb, Highlight = hl }
+        end
+    end
 end
 
 -- ==========================
--- UI SYSTEM (Fixed for Delta)
+-- MAIN LOOP
+-- ==========================
+local interactTimer = 0
+local stuckTimer = 0
+local lastDist = math.huge
+
+RunService.RenderStepped:Connect(function(dt)
+    if not State.Running then return end
+
+    local hrp = getHRP()
+    if not hrp then return end
+
+    -- Phase: ไปหาหนังสือ
+    if State.Phase == "toBook" then
+        if not State.CurrentBook or not State.CurrentBook.Part or not State.CurrentBook.Part.Parent then
+            -- หนังสือหายไปแล้ว ไปหาเล่มถัดไป
+            State.CurrentBook = getNextUncollectedBook()
+            if not State.CurrentBook then
+                print("✅ All books collected!")
+                State.Running = false
+                State.Phase = "idle"
+                return
+            end
+        end
+
+        local bookPos = State.CurrentBook.Part.Position
+        local arrived = moveTo(bookPos, CONFIG.InteractRange)
+
+        -- ตรวจสอบว่าติดหรือไม่
+        local dist = getDistance(bookPos)
+        if dist < lastDist then
+            stuckTimer = 0
+        else
+            stuckTimer = stuckTimer + dt
+        end
+        lastDist = dist
+
+        if stuckTimer > 2 then
+            -- ติด ให้กระโดด
+            local humanoid = getHumanoid()
+            if humanoid then
+                humanoid.Jump = true
+                stuckTimer = 0
+            end
+        end
+
+        if arrived or dist < CONFIG.InteractRange then
+            State.Phase = "collect"
+            interactTimer = 0
+            lastDist = math.huge
+            stuckTimer = 0
+        end
+
+    -- Phase: เก็บหนังสือ
+    elseif State.Phase == "collect" then
+        if not State.CurrentBook or not State.CurrentBook.Part or not State.CurrentBook.Part.Parent then
+            State.Phase = "toBook"
+            return
+        end
+
+        interactTimer = interactTimer + dt
+        if interactTimer >= CONFIG.InteractDelay then
+            interactTimer = 0
+            local success = interact(State.CurrentBook.Part)
+
+            -- สมมติว่าเก็บสำเร็จ (หรือรอให้ part หาย)
+            State.CurrentBook.Collected = true
+            State.LastBookPos = State.CurrentBook.Part.Position
+            State.Phase = "toShelf"
+            State.CurrentShelf = findShelfForBook(State.CurrentBook)
+            print(("✅ Collected: %s → Going to Shelf %d"):format(State.CurrentBook.Name, State.CurrentBook.ShelfNum))
+
+            -- ซ่อน ESP หนังสือที่เก็บแล้ว
+            if ESP[State.CurrentBook.Part] then
+                if ESP[State.CurrentBook.Part].Highlight then
+                    ESP[State.CurrentBook.Part].Highlight.FillColor = CONFIG.CollectedColor
+                    ESP[State.CurrentBook.Part].Highlight.OutlineColor = CONFIG.CollectedColor
+                end
+            end
+        end
+
+    -- Phase: ไปหาชั้น
+    elseif State.Phase == "toShelf" then
+        if not State.CurrentShelf or not State.CurrentShelf.Part or not State.CurrentShelf.Part.Parent then
+            print("❌ Shelf not found, finding next book...")
+            State.Phase = "toBook"
+            State.CurrentBook = getNextUncollectedBook()
+            return
+        end
+
+        local shelfPos = State.CurrentShelf.Part.Position
+        local arrived = moveTo(shelfPos, CONFIG.InteractRange)
+
+        local dist = getDistance(shelfPos)
+        if dist < lastDist then
+            stuckTimer = 0
+        else
+            stuckTimer = stuckTimer + dt
+        end
+        lastDist = dist
+
+        if stuckTimer > 2 then
+            local humanoid = getHumanoid()
+            if humanoid then
+                humanoid.Jump = true
+                stuckTimer = 0
+            end
+        end
+
+        if arrived or dist < CONFIG.InteractRange then
+            State.Phase = "place"
+            interactTimer = 0
+            lastDist = math.huge
+            stuckTimer = 0
+        end
+
+    -- Phase: วางหนังสือบนชั้น
+    elseif State.Phase == "place" then
+        interactTimer = interactTimer + dt
+        if interactTimer >= CONFIG.InteractDelay then
+            interactTimer = 0
+
+            if State.CurrentShelf and State.CurrentShelf.Part and State.CurrentShelf.Part.Parent then
+                interact(State.CurrentShelf.Part)
+            end
+
+            if State.CurrentBook then
+                State.CurrentBook.Placed = true
+            end
+            State.PlacedBooks = State.PlacedBooks + 1
+
+            print(("✅ Placed: %s on Shelf %d (%d/%d)"):format(
+                State.CurrentBook.Name,
+                State.CurrentBook.ShelfNum,
+                State.PlacedBooks,
+                State.TotalBooks
+            ))
+
+            -- หาหนังสือเล่มถัดไป
+            State.CurrentBook = getNextUncollectedBook()
+            if State.CurrentBook then
+                State.Phase = "toBook"
+            else
+                print("✅ All books placed! Done!")
+                State.Running = false
+                State.Phase = "idle"
+            end
+
+            lastDist = math.huge
+            stuckTimer = 0
+        end
+    end
+end)
+
+-- ==========================
+-- CONTROLS
+-- ==========================
+local function start()
+    if State.Running then return end
+    scanWorkspace()
+    if #Books == 0 then
+        print("❌ No books found!")
+        return
+    end
+    State.Running = true
+    State.Phase = "toBook"
+    State.PlacedBooks = 0
+    State.CurrentBook = getNextUncollectedBook()
+    refreshESP()
+    print("🚀 Auto collector started!")
+end
+
+local function stop()
+    State.Running = false
+    State.Phase = "idle"
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid:Move(Vector3.new(), true)
+    end
+    print("⏹️ Stopped")
+end
+
+local function step()
+    scanWorkspace()
+    local b = getNextUncollectedBook()
+    if b then
+        State.CurrentBook = b
+        State.Phase = "toBook"
+        State.Running = true
+        print(("📖 Stepping to: %s"):format(b.Name))
+    else
+        print("✅ No more books to collect")
+    end
+end
+
+-- ==========================
+-- UI
 -- ==========================
 local function createUI()
-    Debug.Log("Creating UI...")
-
     local gui = Instance.new("ScreenGui")
     gui.Name = "LibraryProUI"
     gui.ResetOnSpawn = false
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.IgnoreGuiInset = true
-    gui.Enabled = true
     gui.Parent = player:WaitForChild("PlayerGui")
 
-    -- ===== MAIN PANEL =====
+    -- Panel
     local panel = Instance.new("Frame")
-    panel.Name = "MainPanel"
-    panel.Size = UDim2.new(0, 260, 0, 360)
-    panel.Position = UDim2.new(0.5, -130, 0, 70)
-    panel.BackgroundColor3 = Color3.fromRGB(15, 15, 30)
+    panel.Size = UDim2.new(0, 270, 0, 280)
+    panel.Position = UDim2.new(0.5, -135, 0, 60)
+    panel.BackgroundColor3 = Color3.fromRGB(15, 15, 32)
     panel.BorderSizePixel = 0
-    panel.Visible = true
-    panel.ZIndex = 1
     panel.Parent = gui
 
     local pCorner = Instance.new("UICorner")
-    pCorner.CornerScale = UDim2.new(0, 16)
+    pCorner.CornerScale = UDim2.new(0, 14)
     pCorner.Parent = panel
 
     local pStroke = Instance.new("UIStroke")
     pStroke.Color = Color3.fromRGB(100, 60, 200)
     pStroke.Thickness = 2
-    pStroke.Transparency = 0.4
+    pStroke.Transparency = 0.5
     pStroke.Parent = panel
 
-    -- ===== TITLE BAR =====
+    -- Title
     local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 44)
+    titleBar.Size = UDim2.new(1, 0, 0, 40)
     titleBar.BackgroundColor3 = Color3.fromRGB(35, 25, 75)
     titleBar.BorderSizePixel = 0
-    titleBar.ZIndex = 2
     titleBar.Parent = panel
 
     local tbCorner = Instance.new("UICorner")
-    tbCorner.CornerScale = UDim2.new(0, 16)
+    tbCorner.CornerScale = UDim2.new(0, 14)
     tbCorner.Parent = titleBar
 
-    -- Fix top corners only
-    local tbCorner2 = Instance.new("UICorner")
-    tbCorner2.CornerScale = UDim2.new(0, 16)
-    tbCorner2.Parent = titleBar
-
     local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size = UDim2.new(1, -40, 1, 0)
+    titleLbl.Size = UDim2.new(1, -10, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "📚 Library Cleaner Pro"
+    titleLbl.Text = "📚 Library Auto Collector"
     titleLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleLbl.TextSize = 16
+    titleLbl.TextSize = 15
     titleLbl.Font = Enum.Font.GothamBold
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-    titleLbl.ZIndex = 3
     titleLbl.Parent = titleBar
 
-    -- ===== BUTTONS CONTAINER =====
-    local btnContainer = Instance.new("Frame")
-    btnContainer.Size = UDim2.new(1, -20, 0, 220)
-    btnContainer.Position = UDim2.new(0, 10, 0, 54)
-    btnContainer.BackgroundTransparency = 1
-    btnContainer.ZIndex = 1
-    btnContainer.Parent = panel
-
-    local btnList = Instance.new("UIListLayout")
-    btnList.Padding = UDim.new(0, 8)
-    btnList.SortOrder = Enum.SortOrder.LayoutOrder
-    btnList.Parent = btnContainer
-
-    local btnPad = Instance.new("UIPadding")
-    btnPad.PaddingBottom = UDim.new(0, 4)
-    btnPad.Parent = btnContainer
-
-    -- ===== BUTTON CREATOR =====
-    local function createButton(text, icon, color, order, callback)
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 48)
-        btn.BackgroundColor3 = Color3.fromRGB(30, 25, 55)
-        btn.BorderSizePixel = 0
-        btn.ZIndex = 2
-        btn.LayoutOrder = order
-        btn.Parent = btnContainer
-
-        local bCorner = Instance.new("UICorner")
-        bCorner.CornerScale = UDim2.new(0, 10)
-        bCorner.Parent = btn
-
-        local bStroke = Instance.new("UIStroke")
-        bStroke.Color = color
-        bStroke.Thickness = 1.5
-        bStroke.Transparency = 0.5
-        bStroke.Parent = btn
-
-        local iconLbl = Instance.new("TextLabel")
-        iconLbl.Size = UDim2.new(0, 40, 1, 0)
-        iconLbl.BackgroundTransparency = 1
-        iconLbl.Text = icon
-        iconLbl.TextColor3 = color
-        iconLbl.TextSize = 22
-        iconLbl.Font = Enum.Font.SourceSansBold
-        iconLbl.ZIndex = 3
-        iconLbl.Parent = btn
-
-        local textLbl = Instance.new("TextLabel")
-        textLbl.Size = UDim2.new(1, -48, 1, 0)
-        textLbl.Position = UDim2.new(0, 44, 0, 0)
-        textLbl.BackgroundTransparency = 1
-        textLbl.Text = text
-        textLbl.TextColor3 = Color3.fromRGB(220, 220, 240)
-        textLbl.TextSize = 14
-        textLbl.Font = Enum.Font.Gotham
-        textLbl.TextXAlignment = Enum.TextXAlignment.Left
-        textLbl.ZIndex = 3
-        textLbl.Parent = btn
-
-        local stateLbl = Instance.new("TextLabel")
-        stateLbl.Size = UDim2.new(0, 50, 1, 0)
-        stateLbl.Position = UDim2.new(1, -55, 0, 0)
-        stateLbl.BackgroundTransparency = 1
-        stateLbl.Text = "OFF"
-        stateLbl.TextColor3 = Color3.fromRGB(100, 100, 120)
-        stateLbl.TextSize = 13
-        stateLbl.Font = Enum.Font.GothamBold
-        stateLbl.TextXAlignment = Enum.TextXAlignment.Right
-        stateLbl.ZIndex = 3
-        stateLbl.Parent = btn
-
-        local isActive = false
-
-        local function updateState()
-            isActive = not isActive
-            btn.BackgroundColor3 = isActive and color or Color3.fromRGB(30, 25, 55)
-            stateLbl.Text = isActive and "ON" or "OFF"
-            stateLbl.TextColor3 = isActive and color or Color3.fromRGB(100, 100, 120)
-
-            -- Pulse animation
-            if isActive then
-                local pulse = Instance.new("Frame")
-                pulse.Size = UDim2.new(1, 0, 1, 0)
-                pulse.Position = UDim2.new(0, 0, 0, 0)
-                pulse.BackgroundColor3 = color
-                pulse.BackgroundTransparency = 0.8
-                pulse.BorderSizePixel = 0
-                pulse.ZIndex = 1
-                pulse.Parent = btn
-
-                local pc = Instance.new("UICorner")
-                pc.CornerScale = UDim2.new(0, 10)
-                pc.Parent = pulse
-
-                TweenService:Create(pulse, TweenInfo.new(0.3), {
-                    BackgroundTransparency = 1
-                }):Play()
-
-                game:GetService("Debris"):AddItem(pulse, 0.4)
-            end
-
-            if callback then callback(isActive) end
-        end
-
-        btn.MouseButton1Click:Connect(updateState)
-
-        return {
-            button = btn,
-            getState = function() return isActive end,
-            setState = function(state)
-                isActive = state
-                btn.BackgroundColor3 = state and color or Color3.fromRGB(30, 25, 55)
-                stateLbl.Text = state and "ON" or "OFF"
-                stateLbl.TextColor3 = state and color or Color3.fromRGB(100, 100, 120)
-            end
-        }
-    end
-
-    -- Create buttons
-    local autoBtn = createButton("Auto Collect", "⚡", Color3.fromRGB(0, 200, 100), 1, function(on)
-        autoCollecting = on
-        if on then
-            Debug.Log("Auto collect started")
-        else
-            Debug.Log("Auto collect stopped")
-        end
-    end)
-
-    local espBtn = createButton("Show ESP", "👁", Color3.fromRGB(0, 150, 255), 2, function(on)
-        espEnabled = on
-        if on then
-            refreshESP()
-            Debug.Log("ESP enabled")
-        else
-            clearESP()
-            Debug.Log("ESP disabled")
-        end
-    end)
-
-    local collectBtn = createButton("Collect Once", "📚", Color3.fromRGB(200, 150, 0), 3, function(on)
-        if on then
-            collect()
-            -- Reset after short delay
-            game:GetService("Debris"):AddItem(Instance.new("BindableEvent"), 0.3)
-            collectBtn.setState(false)
-        end
-    end)
-
-    -- ===== STATUS BAR =====
-    local statusFrame = Instance.new("Frame")
-    statusFrame.Size = UDim2.new(1, -20, 0, 30)
-    statusFrame.Position = UDim2.new(0, 10, 1, -40)
-    statusFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 25)
-    statusFrame.BorderSizePixel = 0
-    statusFrame.ZIndex = 1
-    statusFrame.Parent = panel
-
-    local sfCorner = Instance.new("UICorner")
-    sfCorner.CornerScale = UDim2.new(0, 8)
-    sfCorner.Parent = statusFrame
-
-    local statusLbl = Instance.new("TextLabel")
-    statusLbl.Size = UDim2.new(1, 0, 1, 0)
-    statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = "Status: Ready | Tap ⚡ to start"
-    statusLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
-    statusLbl.TextSize = 12
-    statusLbl.Font = Enum.Font.Gotham
-    statusLbl.ZIndex = 2
-    statusLbl.Parent = statusFrame
-
-    -- ===== RANGE SLIDER =====
-    local sliderFrame = Instance.new("Frame")
-    sliderFrame.Size = UDim2.new(1, -20, 0, 40)
-    sliderFrame.Position = UDim2.new(0, 10, 1, -80)
-    sliderFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 40)
-    sliderFrame.BorderSizePixel = 0
-    sliderFrame.ZIndex = 1
-    sliderFrame.Parent = panel
-
-    local slCorner = Instance.new("UICorner")
-    slCorner.CornerScale = UDim2.new(0, 8)
-    slCorner.Parent = sliderFrame
-
-    local slLbl = Instance.new("TextLabel")
-    slLbl.Size = UDim2.new(0, 100, 0, 18)
-    slLbl.Position = UDim2.new(0, 8, 0, 4)
-    slLbl.BackgroundTransparency = 1
-    slLbl.Text = "Range:"
-    slLbl.TextColor3 = Color3.fromRGB(180, 180, 200)
-    slLbl.TextSize = 12
-    slLbl.Font = Enum.Font.Gotham
-    slLbl.TextXAlignment = Enum.TextXAlignment.Left
-    slLbl.Parent = sliderFrame
-
-    local slValLbl = Instance.new("TextLabel")
-    slValLbl.Size = UDim2.new(0, 40, 0, 18)
-    slValLbl.Position = UDim2.new(1, -50, 0, 4)
-    slValLbl.BackgroundTransparency = 1
-    slValLbl.Text = tostring(CONFIG.Range)
-    slValLbl.TextColor3 = CONFIG.ESPColor
-    slValLbl.TextSize = 12
-    slValLbl.Font = Enum.Font.GothamBold
-    slValLbl.TextXAlignment = Enum.TextXAlignment.Right
-    slValLbl.Parent = sliderFrame
-
-    local slBg = Instance.new("Frame")
-    slBg.Size = UDim2.new(1, -16, 0, 8)
-    slBg.Position = UDim2.new(0, 8, 0, 26)
-    slBg.BackgroundColor3 = Color3.fromRGB(40, 35, 65)
-    slBg.BorderSizePixel = 0
-    slBg.Parent = sliderFrame
-
-    local slBgCorner = Instance.new("UICorner")
-    slBgCorner.CornerScale = UDim2.new(0, 4)
-    slBgCorner.Parent = slBg
-
-    local slFill = Instance.new("Frame")
-    slFill.Size = UDim2.new(CONFIG.Range / 100, 0, 1, 0)
-    slFill.BackgroundColor3 = CONFIG.ESPColor
-    slFill.BorderSizePixel = 0
-    slFill.Parent = slBg
-
-    local slFillCorner = Instance.new("UICorner")
-    slFillCorner.CornerScale = UDim2.new(0, 4)
-    slFillCorner.Parent = slFill
-
-    local slKnob = Instance.new("Frame")
-    slKnob.Size = UDim2.new(0, 16, 0, 16)
-    slKnob.Position = UDim2.new(CONFIG.Range / 100, 0, 0, -4)
-    slKnob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    slKnob.BorderSizePixel = 0
-    slKnob.ZIndex = 2
-    slKnob.Parent = slBg
-
-    local slKnobCorner = Instance.new("UICorner")
-    slKnobCorner.CornerScale = UDim2.new(0.5, 0)
-    slKnobCorner.Parent = slKnob
-
-    -- Slider interaction
+    -- Drag
     local dragging = false
-    slBg.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            local rx = input.Position.X - slBg.AbsolutePosition.X
-            local ratio = math.clamp(rx / slBg.AbsoluteSize.X, 0, 1)
-            CONFIG.Range = math.floor(ratio * 100)
-            slFill.Size = UDim2.new(ratio, 0, 1, 0)
-            slKnob.Position = UDim2.new(ratio, 0, 0, -4)
-            slValLbl.Text = tostring(CONFIG.Range)
-        end
-    end)
-
-    slBg.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-            local rx = input.Position.X - slBg.AbsolutePosition.X
-            local ratio = math.clamp(rx / slBg.AbsoluteSize.X, 0, 1)
-            CONFIG.Range = math.floor(ratio * 100)
-            slFill.Size = UDim2.new(ratio, 0, 1, 0)
-            slKnob.Position = UDim2.new(ratio, 0, 0, -4)
-            slValLbl.Text = tostring(CONFIG.Range)
-        end
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = false
-        end
-    end)
-
-    -- ===== DRAG PANEL =====
-    local dragStart = nil
-    local startPos = nil
+    local dragStart, startPos
 
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
             dragStart = input.Position
             startPos = panel.Position
         end
     end)
 
     titleBar.InputChanged:Connect(function(input)
-        if dragStart and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
+        if dragging then
             local delta = input.Position - dragStart
             panel.Position = UDim2.new(
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
             )
         end
     end)
 
     titleBar.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragStart = nil
+            dragging = false
         end
     end)
 
-    Debug.Log("UI created successfully")
+    -- Content
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, -16, 1, -56)
+    content.Position = UDim2.new(0, 8, 0, 48)
+    content.BackgroundTransparency = 1
+    content.Parent = panel
 
-    return {
-        status = statusLbl,
-        panel = panel,
-        autoBtn = autoBtn,
-        espBtn = espBtn,
-    }
-end
+    local list = Instance.new("UIListLayout")
+    list.Padding = UDim.new(0, 6)
+    list.Parent = content
 
--- ==========================
--- STATUS UPDATE
--- ==========================
-local function updateStatus(text, color)
-    if ui and ui.status then
-        ui.status.Text = text
-        ui.status.TextColor3 = color or CONFIG.ESPColor
-    end
-end
+    -- Status
+    local statusFrame = Instance.new("Frame")
+    statusFrame.Size = UDim2.new(1, 0, 0, 28)
+    statusFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 28)
+    statusFrame.BorderSizePixel = 0
+    statusFrame.Parent = content
 
--- ==========================
--- QUICK BUTTONS (Floating)
--- ==========================
-local function createQuickButtons()
-    local qgui = Instance.new("ScreenGui")
-    qgui.Name = "QuickActions"
-    qgui.ResetOnSpawn = false
-    qgui.IgnoreGuiInset = true
-    qgui.Parent = player:WaitForChild("PlayerGui")
+    local sfCorner = Instance.new("UICorner")
+    sfCorner.CornerScale = UDim2.new(0, 6)
+    sfCorner.Parent = statusFrame
 
-    local buttons = {
-        { icon = "📚", color = Color3.fromRGB(200, 150, 0), y = 120, action = function() collect() end },
-        { icon = "⚡", color = Color3.fromRGB(0, 200, 100), y = 184, action = function()
-            autoCollecting = not autoCollecting
-            if ui and ui.autoBtn then
-                ui.autoBtn.setState(autoCollecting)
-            end
-            updateStatus(autoCollecting and "Status: Auto Collecting..." or "Status: Stopped",
-                autoCollecting and Color3.fromRGB(0, 255, 100) or Color3.fromRGB(255, 150, 50))
-        end},
-        { icon = "👁", color = Color3.fromRGB(0, 150, 255), y = 248, action = function()
-            espEnabled = not espEnabled
-            if espEnabled then
-                refreshESP()
-            else
-                clearESP()
-            end
-            if ui and ui.espBtn then
-                ui.espBtn.setState(espEnabled)
-            end
-        end},
-    }
+    local statusLbl = Instance.new("TextLabel")
+    statusLbl.Size = UDim2.new(1, 0, 1, 0)
+    statusLbl.BackgroundTransparency = 1
+    statusLbl.Text = "Status: Ready"
+    statusLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
+    statusLbl.TextSize = 11
+    statusLbl.Font = Enum.Font.Gotham
+    statusLbl.Parent = statusFrame
 
-    for _, data in ipairs(buttons) do
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 56, 0, 56)
-        btn.Position = UDim2.new(1, -68, 0, data.y)
-        btn.BackgroundColor3 = Color3.fromRGB(25, 22, 45)
-        btn.BorderSizePixel = 0
-        btn.Text = data.icon
-        btn.TextSize = 24
-        btn.Font = Enum.Font.SourceSansBold
-        btn.ZIndex = 5
-        btn.Parent = qgui
+    -- Progress
+    local progFrame = Instance.new("Frame")
+    progFrame.Size = UDim2.new(1, 0, 0, 20)
+    progFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 40)
+    progFrame.BorderSizePixel = 0
+    progFrame.Parent = content
+
+    local pfCorner = Instance.new("UICorner")
+    pfCorner.CornerScale = UDim2.new(0, 4)
+    pfCorner.Parent = progFrame
+
+    local progFill = Instance.new("Frame")
+    progFill.Size = UDim2.new(0, 0, 1, 0)
+    progFill.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
+    progFill.BorderSizePixel = 0
+    progFill.Parent = progFrame
+
+    local pfc = Instance.new("UICorner")
+    pfc.CornerScale = UDim2.new(0, 4)
+    pfc.Parent = progFill
+
+    local progLbl = Instance.new("TextLabel")
+    progLbl.Size = UDim2.new(1, 0, 1, 0)
+    progLbl.BackgroundTransparency = 1
+    progLbl.Text = "0 / 0"
+    progLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    progLbl.TextSize = 11
+    progLbl.Font = Enum.Font.GothamBold
+    progLbl.Parent = progFrame
+
+    -- Buttons
+    local function btn(text, color, callback)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 40)
+        b.BackgroundColor3 = color
+        b.BorderSizePixel = 0
+        b.Text = text
+        b.TextColor3 = Color3.fromRGB(255, 255, 255)
+        b.TextSize = 13
+        b.Font = Enum.Font.GothamBold
+        b.Parent = content
 
         local bc = Instance.new("UICorner")
-        bc.CornerScale = UDim2.new(0.5, 0)
-        bc.Parent = btn
+        bc.CornerScale = UDim2.new(0, 8)
+        bc.Parent = b
 
-        local bs = Instance.new("UIStroke")
-        bs.Color = data.color
-        bs.Thickness = 2
-        bs.Transparency = 0.3
-        bs.Parent = btn
-
-        btn.MouseButton1Click:Connect(function()
-            data.action()
-            -- Ripple effect
-            TweenService:Create(btn, TweenInfo.new(0.1), {Size = UDim2.new(0, 50, 0, 50)}):Play()
-            TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Elastic), {Size = UDim2.new(0, 56, 0, 56)}):Play()
-        end)
+        b.MouseButton1Click:Connect(callback)
+        return b
     end
+
+    local startBtn = btn("▶ START AUTO", Color3.fromRGB(0, 150, 80), function()
+        start()
+    end)
+
+    local stepBtn = btn("📖 STEP (One Book)", Color3.fromRGB(0, 120, 200), function()
+        step()
+    end)
+
+    local stopBtn = btn("⏹ STOP", Color3.fromRGB(180, 50, 50), function()
+        stop()
+    end)
+
+    local espBtn = btn("👁 TOGGLE ESP", Color3.fromRGB(100, 80, 200), function()
+        refreshESP()
+    end)
+
+    local rescanBtn = btn("🔄 RESCAN", Color3.fromRGB(150, 120, 50), function()
+        scanWorkspace()
+        refreshESP()
+    end)
+
+    -- Update progress
+    RunService.RenderStepped:Connect(function()
+        if State.TotalBooks > 0 then
+            local pct = State.PlacedBooks / State.TotalBooks
+            progFill.Size = UDim2.new(pct, 0, 1, 0)
+            progLbl.Text = ("%d / %d"):format(State.PlacedBooks, State.TotalBooks)
+        end
+
+        if State.Running then
+            local phaseText = State.Phase
+            if State.CurrentBook then
+                statusLbl.Text = ("Phase: %s | %s"):format(phaseText, State.CurrentBook.Name)
+            else
+                statusLbl.Text = ("Phase: %s"):format(phaseText)
+            end
+            statusLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            statusLbl.Text = "Status: Ready"
+            statusLbl.TextColor3 = Color3.fromRGB(0, 255, 200)
+        end
+    end)
 end
 
 -- ==========================
--- MAIN LOOPS
+-- HOTKEYS
 -- ==========================
-local collectTimer = 0
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
 
-RunService.RenderStepped:Connect(function(dt)
-    -- Auto collect loop
-    if autoCollecting then
-        collectTimer = collectTimer + dt
-        if collectTimer >= CONFIG.CollectDelay then
-            collectTimer = 0
-            collect()
-        end
+    if input.KeyCode == Enum.KeyCode.P then
+        if State.Running then stop() else start() end
     end
 
-    -- ESP refresh loop
-    if espEnabled then
-        espTimer = (espTimer or 0) + dt
-        if espTimer >= 0.5 then
-            espTimer = 0
-            refreshESP()
-        end
+    if input.KeyCode == Enum.KeyCode.K then
+        step()
     end
-end)
 
--- ==========================
--- CLEANUP
--- ==========================
-Players.LocalPlayer.CharacterAdded:Connect(function()
-    clearESP()
-    if espEnabled then
-        game:GetService("RunService").RenderStepped:Wait()
+    if input.KeyCode == Enum.KeyCode.Semicolon then
         refreshESP()
     end
 end)
@@ -772,41 +732,12 @@ end)
 -- ==========================
 -- INIT
 -- ==========================
-Debug.Log("Creating UI...")
-local ok, err = pcall(function()
-    ui = createUI()
-end)
+createUI()
+scanWorkspace()
+refreshESP()
 
-if not ok then
-    Debug.Warn("UI creation failed: " .. tostring(err))
-    -- Fallback: minimal UI
-    local fgui = Instance.new("ScreenGui")
-    fgui.Name = "FallbackUI"
-    fgui.Parent = player:WaitForChild("PlayerGui")
-
-    local fbtn = Instance.new("TextButton")
-    fbtn.Size = UDim2.new(0, 200, 0, 50)
-    fbtn.Position = UDim2.new(0.5, -100, 0, 100)
-    fbtn.BackgroundColor3 = Color3.fromRGB(0, 200, 100)
-    fbtn.Text = "📚 Collect"
-    fbtn.TextSize = 20
-    fbtn.Font = Enum.Font.GothamBold
-    fbtn.Parent = fgui
-
-    fbtn.MouseButton1Click:Connect(function()
-        collect()
-    end)
-
-    Debug.Log("Fallback UI loaded")
-else
-    Debug.Log("UI loaded successfully")
-    createQuickButtons()
-    updateStatus("Status: Ready | Tap ⚡ or 📚 to start", CONFIG.ESPColor)
-end
-
-Debug.Log("Library Pro v3 loaded!")
-print("📚 Library Cleaner Pro v3 loaded!")
-print("  📚 = Collect once")
-print("  ⚡ = Toggle auto collect")
-print("  👁 = Toggle ESP")
-print("  Drag panel by title bar")
+print("📚 Clean The Library Auto Collector loaded!")
+print("  P = Start/Stop Auto")
+print("  K = Collect One Book (Step)")
+print("  ; = Refresh ESP")
+print("  Or use the UI panel")
